@@ -1,0 +1,81 @@
+# Single-node example for 8 NVIDIA GPUs. A global generation batch of 16 is
+# required because num_generations is 16.
+
+env:
+  TOKENIZERS_PARALLELISM: false
+  PYTORCH_ALLOC_CONF: "expandable_segments:True,max_split_size_mb:2048"
+
+# Data
+dataset_name: nv-reason-ct-grpo-example
+dataset_path: grpo.jsonl
+dataset_root: datalists/
+image_dir: images/
+dataset_streaming: false
+enable_thinking: true
+
+# Model
+model_name_or_path: nvidia/NV-Reason-CT
+model_revision: main
+dtype: bfloat16
+trust_remote_code: true
+attn_implementation: flash_attention_2
+
+# Train all CT components end to end. 
+freeze_llm: false
+freeze_visual: false
+freeze_merger: false
+
+# Paper reward: 2.0 * set F1 + 0.5 * report structure + length-band penalty.
+reward_funcs:
+  - accuracy_reward_hard
+  - structured_report_format
+  - soft_band_punishment
+reward_weights: [2.0, 0.5, 1.0]
+
+loss_type: grpo
+scale_rewards: batch
+beta: 0.0
+epsilon: 0.20
+epsilon_high: 0.28
+temperature: 1.0
+mask_truncated_completions: true
+max_completion_length: 1300
+num_generations: 16
+
+# The custom 3D trainer does not support the vLLM generation path.
+use_vllm: false
+use_liger_kernel: true
+
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+output_dir: data/nv_reason_ct_grpo_example
+num_train_epochs: 1
+optim: adamw_torch_fused
+learning_rate: 1.0e-06
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.05
+warmup_steps: 5
+max_grad_norm: 1.0
+
+do_eval: false
+eval_strategy: "no"
+save_steps: 100
+save_total_limit: 3
+
+bf16: true
+tf32: true
+ddp_find_unused_parameters: false
+push_to_hub: false
+seed: 123
+report_to: none
+log_level: info
+logging_steps: 1
+logging_strategy: steps
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 4

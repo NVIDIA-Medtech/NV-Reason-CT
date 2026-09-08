@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/
+
+# Local data, checkpoints, and experiment logs
+data/
+images/
+outputs/
+wandb/
+*.nii
+*.nii.gz
+*.safetensors
+*.bin
+
