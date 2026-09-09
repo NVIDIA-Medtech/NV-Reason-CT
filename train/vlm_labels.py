@@ -7,13 +7,6 @@ from dataclasses import dataclass
 class CTLabels:
     """Region-specific labels used by NV-Reason-CT."""
 
-    Noncontrast_CT: str = "Noncontrast CT"
-    Contrast_CT: str = "Contrast CT"
-
-    Chest_coverage: str = "chest_coverage"
-    Abdomen_coverage: str = "abdomen_coverage"
-    Pelvis_coverage: str = "pelvis_coverage"
-
     # CT-RATE original Chest 18 labels
     Medical_material: str = "Medical material"
     Arterial_wall_calcification: str = "Arterial wall calcification"
@@ -82,15 +75,7 @@ class CTLabels:
     No_Abdominal_Finding: str = "No Abdominal Finding"
 
     @staticmethod
-    def get_protocol_list():
-        return [CTLabels.Noncontrast_CT, CTLabels.Contrast_CT]
-
-    @staticmethod
-    def get_coverage_fields():
-        return [CTLabels.Chest_coverage, CTLabels.Abdomen_coverage, CTLabels.Pelvis_coverage]
-
-    @staticmethod
-    def get_chest_finding_list():
+    def get_chest_list():
         return [
             CTLabels.Medical_material,
             CTLabels.Arterial_wall_calcification,
@@ -122,14 +107,11 @@ class CTLabels:
             CTLabels.Thoracic_vascular_abnormality,
             CTLabels.Esophageal_abnormality,
             CTLabels.Postoperative_or_treatment_related_change,
+            CTLabels.No_Chest_Finding,
         ]
 
     @staticmethod
-    def get_chest_list():
-        return CTLabels.get_chest_finding_list() + [CTLabels.No_Chest_Finding]
-
-    @staticmethod
-    def get_abdomen_finding_list():
+    def get_abdomen_list():
         return [
             CTLabels.Liver_cyst,
             CTLabels.Liver_mass_or_non_cystic_lesion,
@@ -160,12 +142,5 @@ class CTLabels:
             CTLabels.Abdominopelvic_fracture,
             CTLabels.Abdominal_postoperative_change,
             CTLabels.Abdominal_medical_material,
+            CTLabels.No_Abdominal_Finding,
         ]
-
-    @staticmethod
-    def get_abdomen_list():
-        return CTLabels.get_abdomen_finding_list() + [CTLabels.No_Abdominal_Finding]
-
-    @staticmethod
-    def get_list():
-        return CTLabels.get_chest_list() + CTLabels.get_abdomen_list()

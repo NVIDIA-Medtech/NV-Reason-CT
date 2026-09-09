@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--disable-thinking",
         action="store_true",
-        help="Disable Qwen3.5 thinking mode",
+        help="Disable thinking mode",
     )
     return parser.parse_args()
 

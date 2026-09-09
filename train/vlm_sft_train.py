@@ -1,9 +1,9 @@
 """Supervised fine-tuning example for NV-Reason-CT.
 
 The custom collator keeps NIfTI paths out of the chat-template text and routes
-them through the downloaded processor's ``images3d=`` interface. The stock
-Qwen3.5 2D vision tower remains frozen; the 3D vision encoder, multimodal
-projector, and language model can be trained or frozen independently.
+them through the downloaded processor's ``images3d=`` interface. The 3D vision
+encoder, multimodal projector, and language model can be trained or frozen
+independently.
 """
 
 import logging
@@ -20,7 +20,7 @@ from accelerate import PartialState
 from datasets import disable_caching
 from transformers import AutoModelForImageTextToText, AutoProcessor, set_seed
 from transformers.trainer_utils import get_last_checkpoint
-from trl import ModelConfig, ScriptArguments, SFTConfig, SFTTrainer, TrlParser
+from trl import ModelConfig, SFTConfig, SFTTrainer, TrlParser
 
 
 TRAIN_DIR = Path(__file__).resolve().parent
@@ -37,14 +37,11 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class VLMScriptArguments(ScriptArguments):
+class VLMScriptArguments:
     """NV-Reason-CT-specific command-line arguments."""
 
     dataset_path: str = field(
-        default="sft.jsonl", metadata={"help": "Dataset JSONL filename or path."}
-    )
-    dataset_root: str | None = field(
-        default="datalists", metadata={"help": "Root for a relative dataset_path."}
+        default="datalists/sft.jsonl", metadata={"help": "Path to the dataset JSONL file."}
     )
     image_dir: str = field(
         default="images", metadata={"help": "Root for relative NIfTI paths."}
@@ -69,13 +66,6 @@ class VLMScriptArguments(ScriptArguments):
     completion_only: bool = field(
         default=True,
         metadata={"help": "Compute loss only on the final assistant response."},
-    )
-    per_group_lr: bool = field(
-        default=True,
-        metadata={
-            "help": "Use paper component LRs: 3D vision encoder 0.1x, "
-            "projector 5x, LLM 1x."
-        },
     )
 
 
@@ -108,12 +98,10 @@ def _format_sample(sample: Dict[str, Any], image_dir: str) -> Dict[str, Any]:
 
 
 def load_training_dataset(script_args: VLMScriptArguments):
-    dataset_file = _resolve_relative(script_args.dataset_root, script_args.dataset_path)
     train_dataset = datasets.load_dataset(
         "json",
-        data_files=dataset_file,
+        data_files=script_args.dataset_path,
         split="train",
-        streaming=script_args.dataset_streaming,
     )
     required = {"messages", "anatomy_region"}
     missing = required - set(train_dataset.column_names)
@@ -123,8 +111,7 @@ def load_training_dataset(script_args: VLMScriptArguments):
         _format_sample,
         fn_kwargs={"image_dir": script_args.image_dir},
     )
-    if not isinstance(train_dataset, datasets.IterableDataset):
-        logger.info("Loaded %d SFT examples from %s", len(train_dataset), dataset_file)
+    logger.info("Loaded %d SFT examples from %s", len(train_dataset), script_args.dataset_path)
     return train_dataset
 
 
@@ -211,69 +198,7 @@ class VLM_SFT_DataCollator:
         return batch
 
 
-def create_param_groups(model, base_lr: float, weight_decay: float):
-    """Create the component-wise learning-rate groups used in the paper."""
-
-    def split_decay(named_parameters):
-        decay, no_decay = [], []
-        for name, parameter in named_parameters:
-            if not parameter.requires_grad:
-                continue
-            lower_name = name.lower()
-            if (
-                parameter.ndim < 2
-                or name.endswith(".bias")
-                or "norm" in lower_name
-                or "conv1d.weight" in lower_name
-            ):
-                no_decay.append(parameter)
-            else:
-                decay.append(parameter)
-        return decay, no_decay
-
-    llm_parameters = list(model.model.language_model.named_parameters())
-    llm_parameter_ids = {id(parameter) for _, parameter in llm_parameters}
-    llm_parameters.extend(
-        (f"lm_head.{name}", parameter)
-        for name, parameter in model.lm_head.named_parameters()
-        if id(parameter) not in llm_parameter_ids
-    )
-    components = [
-        ("projector", model.model.vision3d.merger.named_parameters(), base_lr * 5.0),
-        (
-            "vision_encoder",
-            model.model.vision3d.sub_vision.named_parameters(),
-            base_lr * 0.1,
-        ),
-        ("language", llm_parameters, base_lr),
-    ]
-
-    groups = []
-    for component, named_parameters, learning_rate in components:
-        decay, no_decay = split_decay(named_parameters)
-        if decay:
-            groups.append(
-                {
-                    "params": decay,
-                    "lr": learning_rate,
-                    "weight_decay": weight_decay,
-                    "name": f"{component}_decay",
-                }
-            )
-        if no_decay:
-            groups.append(
-                {
-                    "params": no_decay,
-                    "lr": learning_rate,
-                    "weight_decay": 0.0,
-                    "name": f"{component}_no_decay",
-                }
-            )
-    return groups
-
-
 def _set_trainable_components(model, script_args: VLMScriptArguments) -> None:
-    # CT volumes never use the stock Qwen 2D tower.
     for parameter in model.model.visual.parameters():
         parameter.requires_grad = False
 
@@ -323,14 +248,9 @@ def main(script_args, training_args, model_args) -> None:
         logger.info("Resuming from detected checkpoint %s", last_checkpoint)
 
     train_dataset = load_training_dataset(script_args)
-    if isinstance(train_dataset, datasets.IterableDataset):
-        training_args.dataloader_drop_last = True
-        training_args.accelerator_config.dispatch_batches = False
-        training_args.ignore_data_skip = True
 
     model = AutoModelForImageTextToText.from_pretrained(
         model_args.model_name_or_path,
-        revision=model_args.model_revision,
         device_map=None,
         trust_remote_code=model_args.trust_remote_code,
         attn_implementation=model_args.attn_implementation,
@@ -339,18 +259,11 @@ def main(script_args, training_args, model_args) -> None:
     )
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
-        revision=model_args.model_revision,
         trust_remote_code=model_args.trust_remote_code,
     )
     processor.tokenizer.padding_side = "right"
     if getattr(processor, "image_processor_3d", None) is None:
         raise RuntimeError("The model repository does not contain image_processor_3d")
-
-    # Keep the processor and 3D tower normalization synchronized with the
-    # released checkpoint. Do not silently override it from a training config.
-    normalize_mode = processor.image_processor_3d.normalize_mode
-    model.config.normalize_mode = normalize_mode
-    model.model.vision3d.normalize_mode = normalize_mode
 
     _set_trainable_components(model, script_args)
     total_parameters = sum(_full_numel(parameter) for parameter in model.parameters())
@@ -368,22 +281,6 @@ def main(script_args, training_args, model_args) -> None:
         100 * trainable_parameters / total_parameters,
     )
 
-    optimizer = None
-    if script_args.per_group_lr:
-        groups = create_param_groups(
-            model,
-            base_lr=training_args.learning_rate,
-            weight_decay=training_args.weight_decay,
-        )
-        for group in groups:
-            logger.info(
-                "Optimizer group %s: lr=%g, weight_decay=%g",
-                group["name"],
-                group["lr"],
-                group["weight_decay"],
-            )
-        optimizer = torch.optim.AdamW(groups, fused=True)
-
     trainer = SFTTrainer(
         model=model,
         args=training_args,
@@ -392,7 +289,6 @@ def main(script_args, training_args, model_args) -> None:
             processor, completion_only=script_args.completion_only
         ),
         processing_class=processor,
-        optimizers=(optimizer, None),
         callbacks=[PerModalityProcessorSaveCallback(processor)],
     )
 
@@ -404,10 +300,6 @@ def main(script_args, training_args, model_args) -> None:
     trainer.save_model(training_args.output_dir)
 
     if trainer.accelerator.is_main_process:
-        trainer.create_model_card(
-            dataset_name=script_args.dataset_name,
-            tags=["ct", "3d-vlm", "nv-reason-ct"],
-        )
         trainer.model.config.use_cache = True
         trainer.model.config.save_pretrained(training_args.output_dir)
         if getattr(trainer.model, "generation_config", None) is not None:

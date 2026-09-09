@@ -1,8 +1,8 @@
 # NV-Reason-CT
 
 NV-Reason-CT is a generative vision-language model for native 3D chest and
-abdominal CT interpretation. It combines a Qwen3.5-4B language model with a
-Primus 3D Vision Transformer and supports abnormality classification,
+abdominal CT interpretation. It combines a Qwen3.5-4B language model with a 3D Vision Transformer
+(Primus, initialized with Colipri weights) and supports abnormality classification,
 structured report generation, visual question answering, and interactive
 reasoning from NIfTI volumes.
 
@@ -41,7 +41,7 @@ Face and stores it in the local Hugging Face cache.
 
 The command-line inference example accepts `--model` when a local model copy or
 a different Hugging Face repository is needed. The training configurations use
-`model_name_or_path: nvidia/NV-Reason-CT` and revision `main` by default.
+`model_name_or_path: nvidia/NV-Reason-CT` by default.
 
 ## Model overview
 
@@ -55,9 +55,8 @@ a different Hugging Face repository is needed. The training configurations use
   language model without spatial merging
 - Position encoding: depth, height, and width are represented with 3D MRoPE
 
-The stock Qwen3.5 2D visual tower is retained for checkpoint compatibility but
-is not used for CT inputs. CT volumes are routed through the custom
-`images3d=` processor argument and the Primus 3D tower.
+CT volumes are routed through the custom `images3d=` processor argument and
+the Primus 3D tower.
 
 ![NV-Reason-CT overview](assets/nv_reason_ct_overview.png)
 
@@ -154,8 +153,6 @@ python inference.py path/to/volume.nii.gz \
 Thinking is enabled by default for reports, questions, and reasoning tasks.
 Use `--disable-thinking` only when a non-thinking response is required.
 
-Both model and processor use custom Hugging Face code, so
-`trust_remote_code=True` is required.
 
 ## Inspect the model input crop
 
@@ -230,8 +227,7 @@ the matching chest or abdominal ontology. Allowed labels are defined in
 
 The SFT collator computes loss only on the final assistant response, sends the
 NIfTI volume through `images3d=`, and preserves Qwen3.5's intended multi-turn
-chat behavior. By default, all CT components are trained end to end while the
-unused stock 2D tower remains frozen.
+chat behavior. By default, all CT components are trained end to end.
 
 ```bash
 accelerate launch --config_file accelerate/zero3.yaml \
@@ -239,20 +235,15 @@ accelerate launch --config_file accelerate/zero3.yaml \
   --config configs/sft_config.yaml
 ```
 
-The paper's component-wise learning rates are enabled by default:
-
-- 3D vision encoder: `0.1 x` the base learning rate
-- multimodal projector: `5 x` the base learning rate
-- language model: `1 x` the base learning rate
+All trainable components use the learning rate specified in the configuration.
 
 Use `--freeze_llm`, `--freeze_visual`, or `--freeze_merger` for controlled
-adaptation experiments. Do not change CT normalization unless the source
-checkpoint was trained for that normalization.
+adaptation experiments. 
 
 ## GRPO example
 
 GRPO generates a structured report and one `<answer>...</answer>` block. The
-default reward matches the method described in the paper:
+example combines three rewards:
 
 ```text
 2.0 * abnormality-set F1
@@ -272,20 +263,8 @@ The custom trainer currently uses standard Transformers generation rather
 than vLLM because the 5D CT tensor and `images3d=` route require specialized
 handling.
 
-## Paper-scale configuration
-
-The reported model was trained on 16 nodes with 8 NVIDIA H100 GPUs per node.
-SFT used per-device batch size 1, two gradient-accumulation steps, fused AdamW,
-a base learning rate of `2e-5`, cosine decay, 3% warm-up, and gradient clipping
-at 0.3. GRPO used 16 completions per prompt, temperature 1.0, maximum completion
-length 1,300, batch-level reward scaling, learning rate `1e-6`, five warm-up
-steps, cosine decay to 5% of the initial rate, gradient clipping at 1.0,
-`epsilon=0.20`, `epsilon_high=0.28`, and no reference-model KL penalty
-(`beta=0`).
-
-The checked-in Accelerate files are portable single-node examples. For a
-multi-node run, configure each machine's rank, rendezvous address, and process
-count through your cluster launcher while retaining the paper hyperparameters.
+The supplied configurations are single-node training examples. Adapt them to
+your own data and hardware.
 
 ## Acknowledgements
 

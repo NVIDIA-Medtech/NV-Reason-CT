@@ -6,16 +6,11 @@ env:
   PYTORCH_ALLOC_CONF: "expandable_segments:True,max_split_size_mb:2048"
 
 # Data
-dataset_name: nv-reason-ct-grpo-example
-dataset_path: grpo.jsonl
-dataset_root: datalists/
+dataset_path: datalists/grpo.jsonl
 image_dir: images/
-dataset_streaming: false
-enable_thinking: true
 
 # Model
 model_name_or_path: nvidia/NV-Reason-CT
-model_revision: main
 dtype: bfloat16
 trust_remote_code: true
 attn_implementation: flash_attention_2

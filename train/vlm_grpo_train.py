@@ -19,7 +19,7 @@ from accelerate import PartialState
 from datasets import disable_caching
 from transformers import AutoModelForImageTextToText, AutoProcessor, set_seed
 from transformers.trainer_utils import get_last_checkpoint
-from trl import GRPOConfig, ModelConfig, ScriptArguments, TrlParser
+from trl import GRPOConfig, ModelConfig, TrlParser
 
 
 TRAIN_DIR = Path(__file__).resolve().parent
@@ -42,12 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class VLMScriptArguments(ScriptArguments):
+class VLMScriptArguments:
     dataset_path: str = field(
-        default="grpo.jsonl", metadata={"help": "Dataset JSONL filename or path."}
-    )
-    dataset_root: str | None = field(
-        default="datalists", metadata={"help": "Root for a relative dataset_path."}
+        default="datalists/grpo.jsonl", metadata={"help": "Path to the dataset JSONL file."}
     )
     image_dir: str = field(
         default="images", metadata={"help": "Root for relative NIfTI paths."}
@@ -75,10 +72,6 @@ class VLMScriptArguments(ScriptArguments):
     )
     prompt: str | None = field(
         default=None, metadata={"help": "Override every dataset user prompt."}
-    )
-    enable_thinking: bool = field(
-        default=True,
-        metadata={"help": "Generate an explicit reasoning trace during GRPO."},
     )
 
 
@@ -116,22 +109,20 @@ def _format_grpo_sample(
     sample: Dict[str, Any],
     image_dir: str,
     prompt_override: str | None,
-    enable_thinking: bool,
 ) -> Dict[str, Any]:
     prompt_text = prompt_override or _extract_user_prompt_text(sample)
     return {
         "id": sample["id"],
         "solution": sample["solution"],
         "prompt": [{"role": "user", "content": prompt_text}],
-        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        "chat_template_kwargs": {"enable_thinking": True},
         "image": _resolve_relative(image_dir, sample["image"]),
         "anatomy_region": sample["anatomy_region"],
     }
 
 
 def load_training_dataset(script_args: VLMScriptArguments):
-    dataset_file = _resolve_relative(script_args.dataset_root, script_args.dataset_path)
-    train_dataset = datasets.load_dataset("json", data_files=dataset_file, split="train")
+    train_dataset = datasets.load_dataset("json", data_files=script_args.dataset_path, split="train")
     required = {"id", "image", "anatomy_region", "solution", "messages"}
     missing = required - set(train_dataset.column_names)
     if missing:
@@ -141,16 +132,14 @@ def load_training_dataset(script_args: VLMScriptArguments):
         fn_kwargs={
             "image_dir": script_args.image_dir,
             "prompt_override": script_args.prompt,
-            "enable_thinking": script_args.enable_thinking,
         },
         remove_columns=train_dataset.column_names,
     )
-    logger.info("Loaded %d GRPO examples from %s", len(train_dataset), dataset_file)
+    logger.info("Loaded %d GRPO examples from %s", len(train_dataset), script_args.dataset_path)
     return train_dataset
 
 
 def _set_trainable_components(model, script_args: VLMScriptArguments) -> None:
-    # CT volumes never use the stock Qwen 2D tower.
     for parameter in model.model.visual.parameters():
         parameter.requires_grad = False
     if script_args.freeze_llm:
@@ -196,7 +185,6 @@ def main(script_args, training_args, model_args) -> None:
 
     model = AutoModelForImageTextToText.from_pretrained(
         model_args.model_name_or_path,
-        revision=model_args.model_revision,
         device_map=None,
         trust_remote_code=model_args.trust_remote_code,
         attn_implementation=model_args.attn_implementation,
@@ -207,16 +195,11 @@ def main(script_args, training_args, model_args) -> None:
 
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
-        revision=model_args.model_revision,
         trust_remote_code=model_args.trust_remote_code,
     )
     processor.tokenizer.padding_side = "left"
     if getattr(processor, "image_processor_3d", None) is None:
         raise RuntimeError("The model repository does not contain image_processor_3d")
-
-    normalize_mode = processor.image_processor_3d.normalize_mode
-    model.config.normalize_mode = normalize_mode
-    model.model.vision3d.normalize_mode = normalize_mode
 
     total_parameters = sum(_full_numel(parameter) for parameter in model.parameters())
     trainable_parameters = sum(
@@ -259,10 +242,6 @@ def main(script_args, training_args, model_args) -> None:
     trainer.save_model(training_args.output_dir)
 
     if trainer.accelerator.is_main_process:
-        trainer.create_model_card(
-            dataset_name=script_args.dataset_name,
-            tags=["ct", "3d-vlm", "nv-reason-ct", "grpo"],
-        )
         trainer.model.config.use_cache = True
         trainer.model.config.save_pretrained(training_args.output_dir)
         if getattr(trainer.model, "generation_config", None) is not None:

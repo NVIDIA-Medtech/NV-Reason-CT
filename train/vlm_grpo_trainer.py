@@ -1,17 +1,3 @@
-# Copyright 2020-2026 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """
 GRPO trainer for NV-Reason-CT.
 
@@ -48,7 +34,6 @@ What this subclass changes vs the stock TRL 1.2.0 GRPOTrainer:
 
 import copy
 import logging
-import time
 from contextlib import nullcontext
 from typing import Any, Optional, Union
 
@@ -208,8 +193,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
                 training_args.beta,
             )
 
-        self.image_token = getattr(self.processing_class, "image_token", None)
-        self.image_token_id = getattr(self.processing_class, "image_token_id", None)
         self.generation_config.use_cache = True
         self._logged_generation_sampling = False
 
@@ -255,11 +238,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
                     )
                 },
             )
-
-    def _log_timing_rank0(self, message: str) -> None:
-        accelerator = getattr(self, "accelerator", None)
-        if accelerator is None or accelerator.process_index == 0:
-            logger.info(message)
 
     def _raise_on_forbidden_multimodal_completion_tokens(
         self,
@@ -414,13 +392,7 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
         image_sizes=None,
         image_position_ids=None,
     ):
-        """Liger-loss helper: forward through model.model and return the last
-        hidden state. Same logic as stock TRL but only threads our VLM3D image
-        kwargs (no video). Liger is disabled by default in our YAML
-        (`use_liger_kernel: false` -- liger has no Qwen3.5 integration as of
-        writing), so this method is mostly here for completeness; it'll fire
-        only if the user overrides the YAML.
-        """
+        """Return hidden states for Liger loss, forwarding the 3D image inputs."""
         if is_peft_model(unwrapped_model):
             unwrapped_model = unwrapped_model.base_model.model
 
@@ -611,7 +583,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
                 "VLM3D_GRPOTrainer only supports use_transformers_paged=False."
             )
 
-        t_start = time.time()
         device = self.accelerator.device
         mode = "train" if self.model.training else "eval"
 
@@ -649,7 +620,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
             maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs
         ]
 
-        t_processor_start = time.time()
         prompt_inputs = self.processing_class(
             text=prompts_text,
             return_tensors="pt",
@@ -658,33 +628,9 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
             add_special_tokens=False,
             **kwargs,
         )
-        t_processor_end = time.time()
         prompt_inputs = Trainer._prepare_inputs(self, prompt_inputs)
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-        t_prompt = time.time()
-        self._log_timing_rank0(
-            f"[TIMING][GRPO] mode={mode} processor_call={t_processor_end-t_processor_start:.2f}s "
-            f"prompt_tokens_shape={tuple(prompt_ids.shape)}"
-        )
-        self._log_timing_rank0(
-            f"[TIMING][GRPO] mode={mode} prompt_prep={t_prompt-t_start:.2f}s "
-            f"batch={len(inputs)} has_images3d={has_images3d}"
-        )
 
-        # TRL 1.2 dropped both `truncate_with_protected_tokens` and the
-        # `max_prompt_length` GRPOTrainer attribute. NV-Reason-CT prompts are
-        # short (single CT volume + a single instruction), so truncation
-        # isn't exercised in practice.
-        max_prompt_length = getattr(self, "max_prompt_length", None) or getattr(
-            self.args, "max_prompt_length", None
-        )
-        if max_prompt_length is not None:
-            logger.warning(
-                "[GRPO][vlm3d] max_prompt_length is set but TRL 1.2.0 removed the truncation helper "
-                "we used to protect vision tokens; this trainer ignores max_prompt_length."
-            )
-
-        t_generate_start = time.time()
         with (
             profiling_context(self, "transformers.generate"),
             unwrap_model_for_generation(
@@ -723,11 +669,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
         prompt_length = prompt_ids.size(1)
         prompt_ids = prompt_completion_ids[:, :prompt_length]
         completion_ids = prompt_completion_ids[:, prompt_length:]
-        t_generate_end = time.time()
-        self._log_timing_rank0(
-            f"[TIMING][GRPO] mode={mode} generate={t_generate_end-t_generate_start:.2f}s "
-            f"prompt_tokens={prompt_ids.size(1)} completion_tokens={completion_ids.size(1)}"
-        )
 
         is_eos = completion_ids == self.eos_token_id
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
@@ -776,7 +717,6 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
 
         with torch.no_grad():
             generate_every = self.args.steps_per_generation * self.num_iterations
-            t_logps_start = time.time()
             if self.args.gradient_accumulation_steps % generate_every != 0:
                 old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
                     self.model,
@@ -817,12 +757,7 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
                         )
             else:
                 ref_per_token_logps = None
-            t_logps_end = time.time()
-            self._log_timing_rank0(
-                f"[TIMING][GRPO] mode={mode} logps_and_ref={t_logps_end-t_logps_start:.2f}s"
-            )
 
-        t_decode_start = time.time()
         completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
         if is_conversational(inputs[0]):
             completions = []
@@ -831,15 +766,10 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
                 completions.append([{"role": "assistant", "content": bootstrap + completion}])
         else:
             completions = completions_text
-        t_decode_end = time.time()
-        self._log_timing_rank0(f"[TIMING][GRPO] mode={mode} decode={t_decode_end-t_decode_start:.2f}s")
 
-        t_rewards_start = time.time()
         rewards_per_func = self._calculate_rewards(
             inputs, original_prompts, completions, completion_ids_list
         )
-        t_rewards_end = time.time()
-        self._log_timing_rank0(f"[TIMING][GRPO] mode={mode} rewards={t_rewards_end-t_rewards_start:.2f}s")
 
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
@@ -926,6 +856,4 @@ class VLM3D_GRPOTrainer(GRPOTrainer):
             output["image_grid_thw"] = prompt_inputs["image_grid_thw"]
         if "mm_token_type_ids" in prompt_inputs:
             output["mm_token_type_ids"] = prompt_inputs["mm_token_type_ids"]
-        t_end = time.time()
-        self._log_timing_rank0(f"[TIMING][GRPO] mode={mode} total_prepare_inputs={t_end-t_start:.2f}s")
         return output

@@ -161,25 +161,14 @@ def structured_report_format_reward(completions, anatomy_region=None, **kwargs) 
         return content[match.end():end].strip()
 
     contents = [completion[0]["content"] for completion in completions]
-    if isinstance(anatomy_region, str) or anatomy_region is None:
-        anatomy_regions = [anatomy_region] * len(contents)
-    else:
-        anatomy_regions = list(anatomy_region)
-    if len(anatomy_regions) != len(contents):
-        raise ValueError(
-            f"anatomy_region length ({len(anatomy_regions)}) must match "
-            f"number of completions ({len(contents)})"
-        )
+    anatomy_regions = _normalize_anatomy_regions(
+        anatomy_region,
+        len(contents),
+        "structured_report_format_reward",
+    )
 
     rewards = []
-    for index, (content, region) in enumerate(zip(contents, anatomy_regions)):
-        region = str(region).strip().lower() if region is not None else ""
-        if region not in region_headers:
-            raise ValueError(
-                f"structured_report_format_reward requires anatomy_region "
-                f"'chest' or 'abdomen'; got {region!r} at index {index}"
-            )
-
+    for content, region in zip(contents, anatomy_regions):
         answer_start = content.find("<answer>")
         answer_end = content.find("</answer>")
         has_one_answer_block = (
@@ -245,8 +234,9 @@ def structured_report_format_reward(completions, anatomy_region=None, **kwargs) 
 def accuracy_reward_f1(completions, solution, anatomy_region=None):
     """Region-adaptive set F1 over labels in the first answer block.
 
-    A present but empty answer block is the SFT convention for the
-    region-specific no-finding label. A missing answer block remains invalid.
+    An empty <answer></answer> intentionally means "No Chest Finding" or
+    "No Abdominal Finding", depending on the region. Gold solutions must name
+    that label explicitly; a missing answer block remains invalid.
     """
     contents = [completion[0]["content"] for completion in completions]
     anatomy_regions = _normalize_anatomy_regions(
@@ -292,11 +282,7 @@ def accuracy_reward_f1(completions, solution, anatomy_region=None):
 
 
 def format_reward(completions) -> list[float]:
-    """Reward completions that contain a parseable <answer>...</answer> block.
-
-    NV-Reason-CT closed-thinking prompts put the <think></think> block in the prompt, so
-    the decoded completion can be a report followed by an answer block.
-    """
+    """Reward a parseable <answer>...</answer> block, with or without thinking text."""
     contents = [completion[0]["content"] for completion in completions]
     rewards = [1.0 if _extract_answer_text(content) is not None else 0.0 for content in contents]
 
