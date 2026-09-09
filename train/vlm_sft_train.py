@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
 """Supervised fine-tuning example for NV-Reason-CT.
 
 The custom collator keeps NIfTI paths out of the chat-template text and routes
