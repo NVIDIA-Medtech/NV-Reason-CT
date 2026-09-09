@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
 """Group Relative Policy Optimization example for NV-Reason-CT.
 
 The companion trainer adapts TRL GRPO to route NIfTI paths through the custom
