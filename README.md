@@ -251,10 +251,11 @@ example combines three rewards:
 + 1.0 * soft completion-length penalty
 ```
 
-Run the single-node example with:
+By default, GRPO trains the language model, 3D encoder, and projector end to
+end. Run the single-node ZeRO-2 example with:
 
 ```bash
-accelerate launch --config_file accelerate/zero3.yaml \
+accelerate launch --config_file accelerate/zero2.yaml \
   train/vlm_grpo_train.py \
   --config configs/grpo_config.yaml
 ```

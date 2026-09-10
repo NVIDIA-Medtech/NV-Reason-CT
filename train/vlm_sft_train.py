@@ -255,8 +255,9 @@ def main(script_args, training_args, model_args) -> None:
         trust_remote_code=model_args.trust_remote_code,
         attn_implementation=model_args.attn_implementation,
         dtype=model_args.dtype,
-        use_cache=False,
     )
+    model.register_for_auto_class("AutoModelForImageTextToText")
+    model.config.text_config.use_cache = False
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
         trust_remote_code=model_args.trust_remote_code,
@@ -300,7 +301,7 @@ def main(script_args, training_args, model_args) -> None:
     trainer.save_model(training_args.output_dir)
 
     if trainer.accelerator.is_main_process:
-        trainer.model.config.use_cache = True
+        trainer.model.config.text_config.use_cache = True
         trainer.model.config.save_pretrained(training_args.output_dir)
         if getattr(trainer.model, "generation_config", None) is not None:
             trainer.model.generation_config.use_cache = True
