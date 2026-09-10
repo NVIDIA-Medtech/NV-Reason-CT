@@ -186,9 +186,12 @@ input and call the processor with `anatomy_region=None` in custom code.
 
 ## Training data
 
-The full training corpus is not distributed here. The two small manifests are
-schema examples only; their image paths are placeholders and no patient data
-are included. Replace them with NIfTI files that you are authorized to use.
+The two manifests contain the same 128 randomly sampled CT-RATE chest records
+(seed 123). `datalists/sft.jsonl` includes the assistant responses;
+`datalists/grpo.jsonl` keeps the same prompts and solutions without assistant
+responses. CT images are not included. Set `image_dir` to the directory
+containing the referenced `ct-rate/dataset/train_fixed_2mm/` tree, or update
+the paths to NIfTI files that you are authorized to use.
 
 Each SFT row contains the conversation and repeats the volume path at the top
 level so the same record is easy to adapt for GRPO:
@@ -230,7 +233,7 @@ NIfTI volume through `images3d=`, and preserves Qwen3.5's intended multi-turn
 chat behavior. By default, all CT components are trained end to end.
 
 ```bash
-accelerate launch --config_file accelerate/zero3.yaml \
+accelerate launch --config_file accelerate/zero2.yaml \
   train/vlm_sft_train.py \
   --config configs/sft_config.yaml
 ```
