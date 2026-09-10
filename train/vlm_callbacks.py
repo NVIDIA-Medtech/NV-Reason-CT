@@ -1,3 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+"""Trainer callbacks for NV-Reason-CT.
+
+Currently provides `PerModalityProcessorSaveCallback`, which patches over
+a quirk in TRL/transformers `trainer.save_model` / `_save_checkpoint`:
+they write the composite `processor_config.json` (with auto_map for
+trust_remote_code reload) but do NOT call each sub-processor's own
+`save_pretrained`. The stock 2D `image_processor` and `video_processor`
+have fallbacks in `AutoImageProcessor` / `AutoVideoProcessor` that
+recover from the composite, but the custom non-primary `image_processor_3d`
+does not. Without the
+`<dir>/image_processor_3d/preprocessor_config.json` subfolder, the processor
+loaded by `AutoProcessor.from_pretrained` would otherwise leave
+`processor.image_processor_3d` as a raw dict instead of an
+`ImageLoader3D` instance.
+
+This is applied automatically every time the trainer saves a checkpoint
+(intermediate `checkpoint-*` dirs as well as the final output dir).
+"""
+
 import logging
 import os
 
