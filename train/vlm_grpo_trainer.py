@@ -14,6 +14,14 @@
 #
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
+#
+# Modified by NVIDIA. This file is a derivative of Hugging Face TRL 1.2.0
+# trl/trainer/grpo_trainer.py (Apache-2.0):
+# https://github.com/huggingface/trl/blob/v1.2.0/trl/trainer/grpo_trainer.py
+# Changes versus stock GRPOTrainer: images3d= processor routing; 5D
+# pixel_values slicing during chunked log-prob computation; Qwen3.5 image
+# placeholders in prepare_image_messages; suppress reserved multimodal
+# control-token IDs while sampling. See THIRD-PARTY-NOTICES.
 
 """
 GRPO trainer for NV-Reason-CT.

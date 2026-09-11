@@ -30,6 +30,8 @@ Face and is intentionally not duplicated here.
 - [`datalists/`](datalists): illustrative JSONL schemas; CT volumes are not
   included
 - [`configs/`](configs): example SFT and GRPO configurations
+- [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES): PyPI dependencies and the
+  TRL-adapted trainer attribution
 
 ## Model source
 
@@ -283,6 +285,8 @@ training strategy introduced in
 This repository is released under the [OpenMDW-1.1 license](LICENSE), the same
 license used by the
 [Hugging Face model repository](https://huggingface.co/nvidia/NV-Reason-CT).
+Third-party package licenses and the TRL 1.2.0 GRPO trainer adaptation are
+listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
 
 ## Citation
 
