@@ -15,7 +15,7 @@ dtype: bfloat16
 trust_remote_code: true
 attn_implementation: flash_attention_2
 
-# Train all CT components end to end. 
+# Train the language model, 3D encoder, and projector end to end.
 freeze_llm: false
 freeze_visual: false
 freeze_merger: false
@@ -33,7 +33,7 @@ beta: 0.0
 epsilon: 0.20
 epsilon_high: 0.28
 temperature: 1.0
-mask_truncated_completions: true
+mask_truncated_completions: false
 max_completion_length: 1300
 num_generations: 16
 
@@ -41,14 +41,14 @@ num_generations: 16
 use_vllm: false
 use_liger_kernel: true
 
-per_device_train_batch_size: 2
-gradient_accumulation_steps: 1
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
 
 output_dir: data/nv_reason_ct_grpo_example
-num_train_epochs: 1
+num_train_epochs: 6
 optim: adamw_torch_fused
 learning_rate: 1.0e-06
 lr_scheduler_type: cosine_with_min_lr
@@ -59,7 +59,7 @@ max_grad_norm: 1.0
 
 do_eval: false
 eval_strategy: "no"
-save_steps: 100
+save_steps: 20
 save_total_limit: 3
 
 bf16: true
