@@ -1,0 +1,11 @@
+torch>=2.9.0
+transformers==5.6.2
+monai>=1.5.1
+nibabel>=5.3.3
+dynamic-network-architectures==0.4.3
+scipy
+numpy
+Pillow
+timm
+einops
+safetensors

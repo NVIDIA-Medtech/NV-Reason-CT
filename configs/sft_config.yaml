@@ -1,0 +1,61 @@
+# Single-node example for 8 NVIDIA GPUs.
+
+env:
+  PYTORCH_ALLOC_CONF: "expandable_segments:True,max_split_size_mb:2048"
+
+# Data
+dataset_path: datalists/sft.jsonl
+image_dir: images/
+
+# Model
+model_name_or_path: nvidia/NV-Reason-CT
+dtype: bfloat16
+trust_remote_code: true
+attn_implementation: flash_attention_2
+
+# Train all CT components end to end. 
+freeze_llm: false
+freeze_head: false
+freeze_visual: false
+freeze_merger: false
+completion_only: true
+
+# SFT
+output_dir: data/nv_reason_ct_sft_example
+num_train_epochs: 1
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+optim: adamw_torch_fused
+learning_rate: 2.0e-05
+weight_decay: 0.0
+lr_scheduler_type: cosine
+warmup_steps: 0.03
+max_grad_norm: 0.3
+
+do_eval: false
+eval_strategy: "no"
+save_steps: 100
+save_total_limit: 3
+
+bf16: true
+tf32: true
+use_liger_kernel: true
+ddp_find_unused_parameters: false
+push_to_hub: false
+seed: 123
+report_to: none
+log_level: info
+logging_steps: 10
+logging_strategy: steps
+
+# The script supplies preformatted multimodal samples and a custom collator.
+remove_unused_columns: false
+dataset_text_field: ""
+dataset_kwargs: {skip_prepare_dataset: true}
+dataset_num_proc: 1
+max_length: null
+dataloader_num_workers: 4

@@ -1,0 +1,6 @@
+-r requirements.txt
+accelerate==1.13.0
+datasets==4.8.4
+trl==1.2.0
+deepspeed==0.18.9
+liger-kernel==0.7.0
