@@ -1,7 +1,7 @@
 ---
 name: nv-reason-ct
 description: Used for mock or live NV-Reason-CT inference on 3D NIfTI chest or abdominal CT volumes. Not for diagnosis, treatment, or clinical reporting.
-license: Apache-2.0
+license: OpenMDW-1.1
 allowed-tools: Bash
 metadata:
   author: "NVIDIA MedTech <noreply@nvidia.com>"
@@ -145,4 +145,4 @@ Live mode uses the upstream contract: `AutoModelForImageTextToText` and `AutoPro
 
 ## License
 
-The wrapper is Apache-2.0. The upstream model repository and weights use OpenMDW-1.1; users are responsible for complying with those terms.
+This skill, including its wrapper, uses OpenMDW-1.1, the same license as the upstream NV-Reason-CT model repository and weights. See [LICENSE](LICENSE) for the full terms. Retain the license and applicable notices when redistributing these materials.

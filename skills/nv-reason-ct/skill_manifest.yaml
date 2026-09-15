@@ -1,6 +1,6 @@
 id: medagent.nv_reason_ct
 version: 0.1.0
-license: Apache-2.0
+license: OpenMDW-1.1
 upstream_refs:
   - kind: huggingface_repo
     name: nvidia/NV-Reason-CT
@@ -13,7 +13,7 @@ upstream_refs:
     revision: main
     notes: README.md, inference.py, and requirements.txt define the upstream single-turn contract. Record the inspected commit in local evidence while the repository is private.
 license_restrictions:
-  wrapper: Apache-2.0
+  wrapper: OpenMDW-1.1
   upstream_model_and_code: OpenMDW-1.1
   redistribution: retain_license_and_applicable_notices
 intended_use:
