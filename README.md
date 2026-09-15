@@ -1,5 +1,11 @@
 # NV-Reason-CT
 
+[![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face-yellow)](https://huggingface.co/nvidia/NV-Reason-CT)
+[![GitHub](https://img.shields.io/badge/github-repo-blue?logo=github)](https://github.com/NVIDIA-Medtech/NV-Reason-CT)
+[![WebDemo](https://img.shields.io/badge/Gradio-Web%20Demo-F97316?logo=gradio&logoColor=white)](https://huggingface.co/spaces/nvidia/nv-reason-ct)
+[![arXiv](https://img.shields.io/badge/arXiv-xyz-B31B1B?logo=arxiv&logoColor=white)](https://arxiv.org/abs/xyz)
+[![License](https://img.shields.io/badge/License-OpenMDW--1.1-f5de53)](LICENSE)
+
 NV-Reason-CT is a generative vision-language model for native 3D chest and
 abdominal CT interpretation. It combines a Qwen3.5-4B language model with a 3D Vision Transformer
 (Primus, initialized with COLIPRI weights) and supports abnormality classification,
@@ -488,6 +494,7 @@ new training run instead of restoring that training state.
 
 ## Acknowledgements
 
+This project was conducted by NVIDIA in collaboration with the NIH National Cancer Institute and University of Zurich.
 NV-Reason-CT builds on
 [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-4B),
 [Primus](https://openreview.net/forum?id=x4vZE4PDEu),
@@ -497,6 +504,8 @@ NV-Reason-CT builds on
 [TRL](https://github.com/huggingface/trl). It extends the reasoning-centered
 training strategy introduced in
 [NV-Reason-CXR](https://github.com/NVIDIA-Medtech/NV-Reason-CXR).
+
+![NV](assets/collab_logos.png)
 
 ## License
 
