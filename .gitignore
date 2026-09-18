@@ -14,3 +14,5 @@ wandb/
 *.safetensors
 *.bin
 
+# Public example volumes (tracked with Git LFS)
+!/examples/*.nii.gz

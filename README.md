@@ -31,7 +31,8 @@ Face and is intentionally not duplicated here.
 - [`train/vlm_grpo_train.py`](train/vlm_grpo_train.py): GRPO entrypoint
 - [`train/vlm_grpo_trainer.py`](train/vlm_grpo_trainer.py): 3D adaptation of the TRL GRPO trainer
 - [`train/vlm_rewards.py`](train/vlm_rewards.py): region-aware verifiable rewards
-- [`datalists/`](datalists): sample training records; CT volumes are not included
+- [`datalists/`](datalists): sample training records; corresponding CT volumes are not included
+- [`examples/`](examples): three example CT volumes stored with Git LFS
 - [`configs/`](configs): example SFT and GRPO configurations
 - [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES): PyPI dependencies and the third-party package licenses
 
@@ -97,17 +98,31 @@ The input CT must contain valid Hounsfield-unit values. Select `"chest"` or
 `"abdomen"` so the processor applies the corresponding deterministic crop.
 Use a scan that contains the requested anatomy.
 
+The examples below use `examples/example_1.nii.gz`, which contains both chest
+and abdomen. The selected region determines which anatomy is cropped.
+
+### Download the example volumes
+
+The three NIfTI volumes in [`examples/`](examples) are stored with Git LFS.
+Install [Git LFS](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage),
+then run these commands from the repository root to download the actual volumes:
+
+```bash
+git lfs install
+git lfs pull --include="examples/*.nii.gz"
+```
+
 ### Command-line examples
 
 Use these prompts to generate a structured report for the selected region:
 
 ```bash
 # Structured chest report
-python inference.py path/to/chest.nii.gz --region chest \
+python inference.py examples/example_1.nii.gz --region chest \
   --prompt "write a structured chest CT report"
 
 # Structured abdominal report
-python inference.py path/to/abdomen.nii.gz --region abdomen \
+python inference.py examples/example_1.nii.gz --region abdomen \
   --prompt "write a structured abdominal CT report"
 ```
 
@@ -116,22 +131,22 @@ reasoning or ask a focused question, change the prompt:
 
 ```bash
 # Chest reasoning
-python inference.py path/to/chest.nii.gz --region chest \
+python inference.py examples/example_1.nii.gz --region chest \
   --prompt "full chest CT reasoning analysis"
 
 # Abdominal reasoning
-python inference.py path/to/abdomen.nii.gz --region abdomen \
+python inference.py examples/example_1.nii.gz --region abdomen \
   --prompt "full abdominal CT reasoning analysis"
 
 # Finding-specific question
-python inference.py path/to/chest.nii.gz --region chest \
+python inference.py examples/example_1.nii.gz --region chest \
   --prompt "Which nodal regions contain lymphadenopathy?"
 ```
 
 Thinking is enabled by default. For a concise response without thinking:
 
 ```bash
-python inference.py path/to/chest.nii.gz --region chest \
+python inference.py examples/example_1.nii.gz --region chest \
   --prompt "Is a pleural effusion present in this CT? Answer only Yes or No." \
   --disable-thinking
 ```
@@ -150,8 +165,8 @@ import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 model_id = "nvidia/NV-Reason-CT"
-chest_path = "path/to/chest.nii.gz"
-abdomen_path = "path/to/abdomen.nii.gz"
+chest_path = "examples/example_1.nii.gz"
+abdomen_path = "examples/example_1.nii.gz"
 
 model = AutoModelForImageTextToText.from_pretrained(
     model_id,
@@ -298,7 +313,7 @@ processor = AutoProcessor.from_pretrained(
     trust_remote_code=True,
 )
 cropped = processor.image_processor_3d.load_image(
-    "path/to/volume.nii.gz",
+    "examples/example_1.nii.gz",
     normalize_mode=0,  # preserve Hounsfield units for inspection
     anatomy_region="chest",
 )
@@ -474,7 +489,7 @@ Both training scripts save the final model and processor directly in
 `--output_dir`. Load that directory with the same inference script:
 
 ```bash
-python inference.py path/to/chest.nii.gz \
+python inference.py examples/example_1.nii.gz \
   --model data/nv_reason_ct_sft_example \
   --region chest
 ```
