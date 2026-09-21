@@ -1,0 +1,9 @@
+{
+  "case_id": "synthetic-ct-smoke",
+  "volume_path": "generated://synthetic_ct_volume",
+  "prompt": "write a structured chest CT report",
+  "anatomy_region": "chest",
+  "enable_thinking": true,
+  "mock": true,
+  "mock_response": "Mock NV-Reason-CT response for generated synthetic CT wiring data. No clinical finding is asserted; this response only verifies NIfTI handling, prompt and anatomy-region wiring, JSON output, and evidence-pack gates."
+}

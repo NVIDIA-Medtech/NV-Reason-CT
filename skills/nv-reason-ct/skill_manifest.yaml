@@ -11,7 +11,7 @@ upstream_refs:
     name: NVIDIA-Medtech/NV-Reason-CT inference examples
     repo_url: https://github.com/NVIDIA-Medtech/NV-Reason-CT
     revision: main
-    notes: README.md, inference.py, and requirements.txt define the upstream single-turn contract. Record the inspected commit in local evidence while the repository is private.
+    notes: README.md, inference.py, and requirements.txt define the upstream single-turn contract. The examples/ directory provides three Git LFS CT volumes; example_1 supports the documented chest and abdomen end-to-end checks. Record the inspected Git commit and LFS content hashes in local evidence while the repository is private.
 license_restrictions:
   wrapper: OpenMDW-1.1
   upstream_model_and_code: OpenMDW-1.1
@@ -39,9 +39,10 @@ inputs:
     formats:
       - json
     description: >
-      JSON request used by the eval harness. It may point to a caller-owned CT
-      volume or request deterministic generated NIfTI wiring data and a mock
-      response; it is not a model-quality demo.
+      JSON request used by the eval harness. It may point to a caller-owned or
+      separately downloaded upstream example CT volume, or request deterministic
+      generated NIfTI wiring data and a mock response. The generated fixture is
+      not a model-quality demo.
   - name: ct_volume
     type: file_path
     formats:
@@ -89,6 +90,7 @@ runtime:
     - NV_REASON_CT_MODEL
     - NV_REASON_CT_REVISION
     - HF_HOME
+    - HF_HUB_CACHE
     - HF_MODULES_CACHE
     - XDG_CACHE_HOME
     - TORCH_HOME
@@ -161,6 +163,7 @@ runtime:
       - NV_REASON_CT_MODEL
       - NV_REASON_CT_REVISION
       - HF_HOME
+      - HF_HUB_CACHE
       - HF_MODULES_CACHE
       - XDG_CACHE_HOME
       - TORCH_HOME
@@ -186,6 +189,12 @@ limitations:
     The committed fixture generates deterministic synthetic NIfTI wiring data
     and a mock response under the run directory. Mock mode does not exercise
     model preprocessing or inference and is not a model-quality demo.
+  - >
+    Real-data integration and live end-to-end checks use the separately
+    downloaded upstream Git LFS examples, not bundled CT images. GitHub access
+    is required while the source is private. example_1 is used for both chest
+    and abdomen; no clinical ground truth or quality score is inferred from
+    agreement with the upstream CLI.
   - >
     Upstream pins transformers==5.6.2 and
     dynamic-network-architectures==0.4.3 and requires torch>=2.9.0 but does not

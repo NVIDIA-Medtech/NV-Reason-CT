@@ -1,11 +1,13 @@
 """Smoke tests for the NV-Reason-CT wrapper.
 
 These tests exercise input handling, deterministic mock output, and clean
-failure paths. They do not download or run model weights.
+failure paths. Success paths use all three upstream volumes when supplied via
+--nv-reason-ct-upstream; otherwise they use small synthetic data. No weights run.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -25,6 +27,19 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 SCRIPT = SKILL_DIR / "scripts" / "run_nv_reason_ct.py"
 FIXTURE = SKILL_DIR / "fixtures" / "synthetic_ct_input.json"
 TEST_COMMIT = "a" * 40
+# Keep this audited shell contract independent of the documentation under test.
+# Stub executables do not sandbox shell builtins or absolute command paths.
+EXPECTED_INSTALL_COMMAND = r'''python -m pip install "huggingface_hub>=1.5,<2" &&
+nv_reason_ct_prereqs="$(mktemp -d)" &&
+hf download nvidia/NV-Reason-CT requirements.txt \
+  --revision "${NV_REASON_CT_REVISION:-main}" --local-dir "$nv_reason_ct_prereqs" &&
+python -m pip install -r "$nv_reason_ct_prereqs/requirements.txt" "torch>=2.9.0"'''
+
+
+def _validated_install_command(command: str) -> str:
+    if command.strip() != EXPECTED_INSTALL_COMMAND:
+        raise ValueError("install command changed; review its shell operations first")
+    return command
 
 
 @pytest.fixture
@@ -99,6 +114,26 @@ def _write_nifti(path: Path, shape: tuple[int, ...] = (8, 9, 10)) -> None:
     nib.save(nib.Nifti1Image(data, np.diag((-2.0, -2.0, 2.0, 1.0))), path)
 
 
+def test_eval_fixtures_resolve_inside_evals():
+    evals_dir = SKILL_DIR / "evals"
+    dataset = json.loads((evals_dir / "evals.json").read_text())
+    for case in dataset["evals"]:
+        for name in case.get("files", []):
+            path = Path(name)
+            assert not path.is_absolute() and ".." not in path.parts
+            resolved = (evals_dir / path).resolve()
+            assert resolved.is_relative_to(evals_dir.resolve())
+            assert resolved.is_file(), f"Missing eval fixture: {name}"
+
+
+def test_eval_fixture_matches_offline_smoke_fixture():
+    # Tier 3 accepts only files contained in evals/. Keep its small synthetic
+    # attachment identical to the runtime fixture; never copy a real CT here.
+    assert (
+        SKILL_DIR / "evals" / "files" / "synthetic_ct_input.json"
+    ).read_bytes() == FIXTURE.read_bytes()
+
+
 def test_json_fixture_mock_generates_valid_output(tmp_path: Path) -> None:
     proc = _run(FIXTURE, "--out-dir", tmp_path / "out")
     assert proc.returncode == 0, proc.stderr
@@ -132,9 +167,66 @@ def test_check_setup_reports_json() -> None:
     assert "recommendation" in payload["setup"]
 
 
-def test_direct_nifti_mock_path(tmp_path: Path) -> None:
-    volume = tmp_path / "ct.nii.gz"
-    _write_nifti(volume)
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "recommendation",
+    [
+        "ready_for_live_cuda_inference",
+        "install_or_repair_upstream_dependencies",
+        "use_the_upstream_exact_dependency_versions",
+        "use_the_upstream_minimum_dependency_versions",
+        "use_a_cuda_host_or_mock_mode",
+        "use_a_cuda_gpu_with_bfloat16_support",
+        "download_model_assets_or_disable_local_files_only",
+    ],
+)
+def test_setup_readiness_exit_contract(
+    wrapper, monkeypatch, capsys, strict, recommendation
+):
+    report = {"skill": "nv_reason_ct", "setup": {"recommendation": recommendation}}
+    monkeypatch.setattr(wrapper, "_setup_report", lambda *_: report)
+    args = ["--check-setup"] + (["--fail-on-not-ready"] if strict else [])
+    code = wrapper.main(args)
+    captured = capsys.readouterr()
+    assert code == int(strict and recommendation != "ready_for_live_cuda_inference")
+    assert json.loads(captured.out) == report
+    assert not captured.err
+
+
+def test_strict_readiness_requires_setup_mode(wrapper, capsys):
+    assert wrapper.main(["--fail-on-not-ready"]) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "requires --check-setup" in captured.err
+
+
+@pytest.mark.parametrize("distribution,module", [("os", "os"), ("torch", "os")])
+def test_setup_imports_reject_undocumented_modules(
+    wrapper, monkeypatch, distribution, module
+):
+    def unexpected_call(*_):
+        pytest.fail("undocumented dependency reached the package probe")
+
+    monkeypatch.setattr(wrapper, "_installed_version", unexpected_call)
+    monkeypatch.setattr(wrapper.importlib, "import_module", unexpected_call)
+    with pytest.raises(wrapper.SkillError, match="documented dependencies"):
+        wrapper._package_status(distribution, module)
+
+
+def test_setup_imports_allow_documented_dependency(wrapper, monkeypatch):
+    imported = []
+    monkeypatch.setattr(wrapper, "_installed_version", lambda _: "25.0")
+    monkeypatch.setattr(wrapper.importlib, "import_module", imported.append)
+    assert wrapper._package_status("packaging", "packaging") == {
+        "installed": True,
+        "importable": True,
+        "version": "25.0",
+    }
+    assert imported == ["packaging"]
+
+
+def test_direct_nifti_mock_path(tmp_path: Path, ct_input: Path) -> None:
+    volume = ct_input
     proc = _run(
         volume,
         "--mock",
@@ -149,7 +241,17 @@ def test_direct_nifti_mock_path(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["input"]["volume"]["source"] == "file"
-    assert payload["input"]["volume"]["shape"] == [8, 9, 10]
+    image = nib.load(volume)
+    assert payload["input"]["volume"]["shape"] == list(image.shape)
+    assert payload["input"]["volume"]["spacing_mm"] == pytest.approx(
+        image.header.get_zooms(), abs=1e-6
+    )
+    assert (
+        payload["input"]["volume"]["sha256"]
+        == hashlib.sha256(volume.read_bytes()).hexdigest()
+    )
+    schema = json.loads((SKILL_DIR / "validators/output_schema.json").read_text())
+    jsonschema.validate(payload, schema)
     assert payload["input"]["anatomy_region"] == "abdomen"
     assert payload["input"]["enable_thinking"] is False
     assert payload["input"]["prompt"].startswith("Summarize")
@@ -176,6 +278,34 @@ def test_rejects_non_nifti_file(tmp_path: Path) -> None:
     proc = _run(bad, "--mock", "--out-dir", tmp_path / "out")
     assert proc.returncode == 2
     assert "expected .nii or .nii.gz" in proc.stderr
+
+
+def test_rejects_git_lfs_pointer_before_loading_model(tmp_path: Path) -> None:
+    volume = tmp_path / "example_1.nii.gz"
+    volume.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        f"oid sha256:{'a' * 64}\nsize 1000\n"
+    )
+    proc = _run(volume, "--out-dir", tmp_path / "out")
+    assert proc.returncode == 2
+    assert "Git LFS pointer" in proc.stderr
+    assert "git lfs pull" in proc.stderr
+    assert not proc.stdout
+
+
+def test_unreadable_volume_fails_cleanly(wrapper, tmp_path, monkeypatch):
+    volume = tmp_path / "ct.nii.gz"
+    volume.touch()
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        if path == volume:
+            raise PermissionError("test input is unreadable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    with pytest.raises(wrapper.SkillError, match="could not read NIfTI volume"):
+        wrapper._volume_info(volume)
 
 
 def test_rejects_4d_nifti(tmp_path: Path) -> None:
@@ -537,25 +667,40 @@ def test_partial_save_failure_still_allows_stdout_payload(
     assert "retain stdout" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf unexpected\n" + EXPECTED_INSTALL_COMMAND,
+        EXPECTED_INSTALL_COMMAND + "\nprintf unexpected",
+        EXPECTED_INSTALL_COMMAND.replace("hf download", "/usr/bin/hf download"),
+        EXPECTED_INSTALL_COMMAND.replace(" &&", ";", 1),
+    ],
+)
+def test_install_command_rejects_unreviewed_shell_operations(command):
+    with pytest.raises(ValueError, match="review its shell operations"):
+        _validated_install_command(command)
+
+
 @pytest.mark.parametrize("download_fails", [False, True])
 def test_documented_install_downloads_before_pip_without_exposing_token(
-    tmp_path, download_fails
+    tmp_path, download_fails, monkeypatch
 ):
+    monkeypatch.setenv("INSTALL_TEST_UNRELATED_SECRET", "unit-test-only")
     command = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())[
         "runtime"
     ]["external_assets"][0]["install_command"]
     assert command.strip() in (SKILL_DIR / "SKILL.md").read_text()
+    command = _validated_install_command(command)
     # Execute the actual documented shell flow with fake installers: no network,
     # package installation, or changes to the caller's environment are permitted.
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     for name in ("python", "hf"):
         executable = fake_bin / name
-        executable.write_text(
-            f"#!{sys.executable}\n"
-            + """
+        executable.write_text(f"#!{sys.executable}\n" + """
 import json, os, sys
 from pathlib import Path
+assert "INSTALL_TEST_UNRELATED_SECRET" not in os.environ
 args = sys.argv[1:]
 name = Path(sys.argv[0]).name
 with Path(os.environ["INSTALL_TEST_LOG"]).open("a") as stream:
@@ -567,8 +712,7 @@ if name == "hf":
     Path(args[args.index("--local-dir") + 1], "requirements.txt").write_text("# test\\n")
 elif "-r" in args:
     assert Path(args[args.index("-r") + 1]).is_file()
-"""
-        )
+""")
         executable.chmod(0o700)
     log_path = tmp_path / "commands.jsonl"
     proc = subprocess.run(
@@ -577,9 +721,10 @@ elif "-r" in args:
         text=True,
         timeout=10,
         env={
-            **os.environ,
             "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
             "TMPDIR": str(tmp_path),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "HF_TOKEN": "unit-test-token",
             "NV_REASON_CT_REVISION": "reviewed-revision",
             "INSTALL_TEST_LOG": str(log_path),
@@ -671,9 +816,9 @@ def test_live_version_check_rejects_missing_or_old_minimum(
         ("abdomen", "write a structured abdominal CT report"),
     ],
 )
-def test_default_prompt_matches_upstream_cli(wrapper, tmp_path, region, prompt):
-    volume = tmp_path / "ct.nii"
-    _write_nifti(volume)
-    spec = wrapper._load_input(volume, tmp_path, None, region, None)
+def test_default_prompt_matches_upstream_cli(
+    wrapper, tmp_path, ct_input, region, prompt
+):
+    spec = wrapper._load_input(ct_input, tmp_path, None, region, None)
     assert spec.prompt == prompt
     assert spec.enable_thinking is True

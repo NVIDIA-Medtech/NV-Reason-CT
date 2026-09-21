@@ -2,7 +2,7 @@
 name: nv-reason-ct
 description: Used for mock or live NV-Reason-CT inference on 3D NIfTI chest or abdominal CT volumes. Not for diagnosis, treatment, or clinical reporting.
 license: OpenMDW-1.1
-allowed-tools: Bash
+allowed-tools: Bash, Read, Write, Env
 metadata:
   author: "NVIDIA MedTech <noreply@nvidia.com>"
   tags:
@@ -25,9 +25,15 @@ metadata:
 1. Read `skill_manifest.yaml` before changing arguments, dependencies, side effects, or validation gates.
 2. Run `scripts/run_nv_reason_ct.py`; do not write replacement inference code or use the Gradio demo for normal runs.
 3. For hosts exposing a helper, use `run_script("scripts/run_nv_reason_ct.py", args=["PATH_TO_CT.nii.gz", "--anatomy-region", "chest", "--prompt", "PROMPT", "--out-dir", "OUT_DIR"])`.
-4. Inspect stdout JSON and the exit status. Preserve JSON for the caller or eval harness, including partial output on failure; do not redirect it away with `>`. Exit code `3` means generation hit the token ceiling without EOS: the text is incomplete and the completion gate fails. Partial JSON is also saved as a unique `partial_result_*.json` under `--out-dir` (path in `output.partial_json_path` and stderr), so callers that discard stdout on failure can retain it.
+4. Inspect stdout JSON and the exit status. Preserve JSON for the caller or eval harness, including partial output on failure; do not redirect it away with `>`. Exit code `3` means generation hit the token ceiling without EOS: the text is incomplete and the completion gate fails. The wrapper also attempts to save a unique `partial_result_*.json` under `--out-dir`. Only a successful save adds `output.partial_json_path` and prints the path on stderr. If saving fails, stderr warns to retain stdout; the JSON remains available there without a file path.
 
-Direct mock smoke test from the repository root:
+Tool scope: `Bash` runs the committed wrapper and documented setup commands; `Read` covers skill files, caller-selected inputs, and model assets; `Write` covers caller-selected outputs and isolated caches. `Env` is SkillSpector's environment-capability label for the runtime variables listed below, accessed through shell/Python on hosts without a separate environment tool. These declarations do not authorize unrelated file access, printing authentication values, or changing an existing development environment.
+
+## Examples
+
+For the end-to-end example, follow [EXAMPLES.md](EXAMPLES.md) to download the upstream Git LFS volumes into a separate checkout, then run `examples/example_1.nii.gz` through the wrapper for both chest and abdomen. That scan covers both regions according to the upstream README. The guide also provides opt-in upstream-parity tests; it never substitutes synthetic data for live verification.
+
+Offline mock smoke test from the repository root (no model inference):
 
 ```bash
 python skills/nv-reason-ct/scripts/run_nv_reason_ct.py \
@@ -49,7 +55,7 @@ For an abdominal crop, pass `--anatomy-region abdomen`. Pass `--anatomy-region n
 
 The region defaults match upstream `inference.py`: `write a structured chest CT report` or `write a structured abdominal CT report`. To exercise another documented prompt in an engineering check, pass `--prompt "full chest CT reasoning analysis"` (or the abdominal equivalent), or preserve the caller's focused question verbatim. Supply a scan that actually covers the requested anatomy; the wrapper does not establish that coverage.
 
-Each invocation loads the model and starts a new single-turn conversation. The upstream README also documents model reuse and follow-up history, but this wrapper does not preserve earlier turns. Do not simulate a follow-up by silently discarding history or carry answers between scans. Upstream training JSONL files are not runnable demo fixtures: they contain records but no CT volumes. Use a separately obtained authorized NIfTI scan; do not use reference assistant answers as inference prompts.
+Each invocation loads the model and starts a new single-turn conversation. The upstream README also documents model reuse and follow-up history, but this wrapper does not preserve earlier turns. Do not simulate a follow-up by silently discarding history or carry answers between scans. Upstream training JSONL files are not runnable demo fixtures: they contain records but no CT volumes. Use the upstream `examples/` volumes or a caller-owned authorized NIfTI scan; do not use reference assistant answers as inference prompts.
 
 ## Available Scripts
 
@@ -72,17 +78,20 @@ python -m pip install -r "$nv_reason_ct_prereqs/requirements.txt" "torch>=2.9.0"
 
 - The [upstream inference repository](https://github.com/NVIDIA-Medtech/NV-Reason-CT) requires `torch>=2.9.0`, `transformers==5.6.2`, `dynamic-network-architectures==0.4.3`, `monai>=1.5.1`, and `nibabel>=5.3.3`. Its PyTorch minimum is supplied explicitly above because the Hugging Face requirements file currently leaves `torch` unconstrained. The setup check and live preflight enforce these exact versions and minima; neither installs or upgrades packages. The tested PyTorch/CUDA build below remains advisory.
 - Model assets may download from `https://huggingface.co` under `~/.cache/huggingface/`. Set `HF_TOKEN` when repository access requires authentication.
+- The upstream examples require Git LFS and GitHub access while the source repository is private. Download actual volumes with `git lfs pull`; a small text pointer named `.nii.gz` is not a CT image. Do not install Git LFS globally or change an existing checkout's configuration without authorization; the example guide uses checkout-local configuration.
 - Run a read-only setup check before downloading weights or starting inference. It checks required files (including all indexed weight shards) in the requested revision only and reports `missing_files`; it does not download assets or prove their integrity:
 
 ```bash
 python skills/nv-reason-ct/scripts/run_nv_reason_ct.py --check-setup
 ```
 
-For a disposable run, keep caches separate from installed packages: set `HF_HOME`, `HF_MODULES_CACHE`, `XDG_CACHE_HOME`, and `TORCH_HOME` to subdirectories of a caller-owned temporary directory before launching Python. After the process exits, remove only those explicitly identified task caches when cleanup is requested, retaining input scans and result JSON. Do not purge a shared Hugging Face cache or change an existing development environment.
+This diagnostic command exits `0` when it produces a report, even if setup is not ready. For an automation gate after staging model assets, use `--check-setup --fail-on-not-ready`: exit `0` means `ready_for_live_cuda_inference`, exit `1` means setup is not ready, and exit `2` means an argument or execution error. Inspect the JSON recommendation in either mode. Enable offline settings only after the selected model assets and custom code are cached.
+
+For a disposable run, keep caches separate from installed packages: set `HF_HOME`, `HF_HUB_CACHE`, `HF_MODULES_CACHE`, `XDG_CACHE_HOME`, and `TORCH_HOME` to subdirectories of a caller-owned temporary directory before launching Python. After the process exits, remove only those explicitly identified task caches when cleanup is requested, retaining input scans and result JSON. Do not purge a shared Hugging Face cache or change an existing development environment.
 
 ### Verified environment baseline
 
-The live CUDA path was reverified end to end against the refreshed upstream inference code on 2026-09-14 with the versions below. Treat this as a known-good verification baseline, not an upstream compatibility guarantee or a complete cross-platform lockfile. In particular, select a PyTorch CUDA build compatible with the host driver; the verified Python distribution version was `torch==2.12.0`, and `torch.__version__` reported `2.12.0+cu130`.
+The live CUDA path was reverified on 2026-09-21 with the upstream `examples/example_1.nii.gz` in both chest and abdomen modes, using the versions below. Treat this as a known-good verification baseline, not an upstream compatibility guarantee or a complete cross-platform lockfile. In particular, select a PyTorch CUDA build compatible with the host driver; the verified Python distribution version was `torch==2.12.0`, and `torch.__version__` reported `2.12.0+cu130`.
 
 | Component | Verified version or setting |
 |---|---|
@@ -102,7 +111,7 @@ The live CUDA path was reverified end to end against the refreshed upstream infe
 | huggingface-hub | `1.30.0` |
 | packaging | `25.0` |
 
-The verified inference settings were one 48 GB NVIDIA RTX 6000 Ada GPU (driver `580.178.04`), bfloat16 model weights, SDPA attention, deterministic decoding (`do_sample=False`), chest anatomy cropping, thinking enabled, and `max_new_tokens=2048`. On the authorized private demo scan, the run generated 587 tokens, completed normally without reaching the token ceiling, and matched the upstream CLI response after trimming surrounding whitespace. Both paths used the same reviewed immutable model revision and offline assets in a disposable environment. This verifies the inference wiring, not clinical correctness. Lower-memory GPUs and other PyTorch/CUDA combinations have not yet been verified by this skill.
+The verified inference settings were one 48 GB NVIDIA RTX 6000 Ada GPU (driver `580.178.04`), bfloat16 model weights, SDPA attention, deterministic decoding (`do_sample=False`), thinking enabled, and `max_new_tokens=2048`. The upstream example generated 438 tokens with the chest crop and 453 with the abdomen crop; neither response was truncated. Both matched the upstream CLI after trimming surrounding whitespace, using the same reviewed immutable model revision and offline assets in a disposable environment. All three upstream volumes also passed input/geometry/hash checks. See [BENCHMARK.md](BENCHMARK.md) for the evidence boundary. This verifies inference wiring, not clinical correctness. Lower-memory GPUs and other PyTorch/CUDA combinations have not yet been verified by this skill.
 
 Environment variables:
 
@@ -112,6 +121,7 @@ Environment variables:
 | `NV_REASON_CT_MODEL` | Override the Hugging Face model id for an explicit compatibility probe. |
 | `NV_REASON_CT_REVISION` | Select a reviewed model revision; prefer an immutable revision for evidence runs. |
 | `HF_HOME` | Point to a caller-managed Hugging Face cache. |
+| `HF_HUB_CACHE` | Set an explicit model cache under `HF_HOME` when isolating a run; overrides any inherited shared Hub cache location. |
 | `HF_MODULES_CACHE` | Isolate downloaded Transformers custom-code modules for a disposable run. |
 | `XDG_CACHE_HOME` | Isolate supporting library caches for a disposable run. |
 | `TORCH_HOME` | Isolate Torch asset caches for a disposable run. |
@@ -127,7 +137,7 @@ Live mode uses the upstream contract: `AutoModelForImageTextToText` and `AutoPro
 - The wrapper loads upstream custom code. Use an isolated environment and an immutable reviewed revision for evidence runs.
 - It checks readable 3D NIfTI structure, positive voxel spacing, a finite affine, and file identity. It does not verify de-identification, Hounsfield-unit calibration, anatomy coverage, crop quality, or clinical correctness.
 - Model output can hallucinate, omit findings, or present unreliable reasoning. Reviewable reasoning text is generated output, not proof of the model's internal computation.
-- The committed fixture generates compact synthetic NIfTI wiring data and a mock response under `--out-dir`. It is not private data, a model-quality demo, or a substitute for live inference.
+- The committed fixture remains a compact synthetic, mock-only offline check. Real-data integration and end-to-end examples use separately downloaded upstream volumes; no CT images or model weights are bundled. Neither kind of check establishes clinical correctness.
 - The moving `main` revision is suitable only for development. Replace it with the reviewed immutable public release revision before publication.
 - This wrapper does not cover the Gradio UI, finetuning, retraining, clinical deployment, or patient-facing use.
 
@@ -140,6 +150,7 @@ Live mode uses the upstream contract: `AutoModelForImageTextToText` and `AutoPro
 | Cache is incomplete in `--check-setup` | The selected revision or some of its required assets are absent. | Inspect `missing_files`, then download the selected revision with authorized access before enabling offline mode. Files cached for another revision do not satisfy this check. |
 | CUDA unavailable or bfloat16 unsupported | Live inference is running on an unsupported device or isolated GPU context. | Use a compatible CUDA host; use `--mock` only for wiring checks. |
 | NIfTI shape or spacing error | Input is unreadable, 4D, or has invalid geometry metadata. | Supply one 3D `.nii` or `.nii.gz` CT volume with valid spacing and affine metadata. |
+| Git LFS pointer instead of a CT volume | The checkout contains the small pointer file, not the NIfTI data. | Run `git lfs pull --include="examples/*.nii.gz"` in the upstream checkout, then retry. Do not substitute a synthetic volume for the end-to-end test. |
 | Poor chest or abdomen crop | Automatic anatomy heuristics do not fit the scan geometry. | Inspect upstream preprocessing, manually crop the CT, and pass `--anatomy-region none`. |
 | Empty or truncated response | Generation stopped without text, or reached the token limit without EOS (exit `3`). | Preserve any partial JSON and stderr; do not treat it as a completed response. Verify setup and input, then adjust `--max-new-tokens` if truncation is reported. |
 

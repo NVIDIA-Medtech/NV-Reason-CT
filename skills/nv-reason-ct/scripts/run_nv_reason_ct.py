@@ -42,6 +42,7 @@ SYNTHETIC_SOFT_TISSUE_HU = 40
 SYNTHETIC_LUNG_HU = -800
 SYNTHETIC_BONE_HU = 300
 HASH_BLOCK_BYTES = 1024 * 1024
+GIT_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
 
 EXACT_UPSTREAM_VERSIONS = {
     "transformers": "5.6.2",
@@ -133,11 +134,13 @@ def _installed_version(dist_name: str) -> str | None:
 
 
 def _package_status(dist_name: str, import_name: str) -> dict[str, Any]:
+    if DEPENDENCY_IMPORTS.get(dist_name) != import_name:
+        raise SkillError("setup probes are limited to the documented dependencies")
     version = _installed_version(dist_name)
     if version is None:
         return {"installed": False, "importable": False, "version": None}
     try:
-        __import__(import_name)
+        importlib.import_module(import_name)
         importable = True
         error = None
     except Exception as exc:  # setup probes must report broken binary imports
@@ -387,6 +390,19 @@ def _volume_info(path: Path) -> VolumeInfo:
     if not _is_nifti_path(path):
         raise SkillError(
             f"unsupported volume format for {path}: expected .nii or .nii.gz"
+        )
+    try:
+        with path.open("rb") as stream:
+            is_lfs_pointer = (
+                stream.read(len(GIT_LFS_POINTER_HEADER)) == GIT_LFS_POINTER_HEADER
+            )
+    except OSError as exc:
+        raise SkillError(f"could not read NIfTI volume {path}: {exc}") from exc
+    if is_lfs_pointer:
+        raise SkillError(
+            f"{path} is a Git LFS pointer, not a downloaded CT volume. "
+            "Run git lfs pull --include='examples/*.nii.gz' in the "
+            "upstream NV-Reason-CT checkout before inference."
         )
 
     nib, np = _nifti_modules()
@@ -830,11 +846,19 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print dependency/GPU/cache readiness JSON and exit.",
     )
+    parser.add_argument(
+        "--fail-on-not-ready",
+        action="store_true",
+        help="With --check-setup, exit 1 unless live CUDA inference is ready.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.fail_on_not_ready and not args.check_setup:
+        print("error: --fail-on-not-ready requires --check-setup", file=sys.stderr)
+        return 2
     if args.max_new_tokens < 1:
         print("error: --max-new-tokens must be >= 1", file=sys.stderr)
         return 2
@@ -847,14 +871,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.check_setup:
-            print(
-                json.dumps(
-                    _setup_report(args.model_id, args.revision),
-                    indent=2,
-                    sort_keys=True,
-                )
+            report = _setup_report(args.model_id, args.revision)
+            print(json.dumps(report, indent=2, sort_keys=True))
+            not_ready = (
+                report["setup"]["recommendation"] != "ready_for_live_cuda_inference"
             )
-            return 0
+            return 1 if args.fail_on_not_ready and not_ready else 0
         if args.volume_or_fixture is None:
             print(
                 "error: volume_or_fixture is required unless --check-setup is used",

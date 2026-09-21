@@ -74,7 +74,11 @@
       "properties": {
         "response_text": {"type": "string", "minLength": 1},
         "text_chars": {"type": "integer", "minimum": 1},
-        "partial_json_path": {"type": "string", "minLength": 1}
+        "partial_json_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Present only after successfully saving partial JSON. If saving fails, retain stdout; this field is absent even for truncated output."
+        }
       },
       "additionalProperties": false
     },
