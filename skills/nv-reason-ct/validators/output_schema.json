@@ -41,7 +41,7 @@
           "properties": {
             "path": {"type": "string", "minLength": 1},
             "source": {
-              "enum": ["file", "fixture_file", "generated_fixture"]
+              "enum": ["file", "fixture_file"]
             },
             "format": {"const": "nifti"},
             "ndim": {"const": 3},

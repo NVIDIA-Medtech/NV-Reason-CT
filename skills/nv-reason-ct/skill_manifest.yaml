@@ -1,5 +1,5 @@
 id: medagent.nv_reason_ct
-version: 0.1.0
+version: 0.2.0
 license: OpenMDW-1.1
 upstream_refs:
   - kind: huggingface_repo
@@ -39,10 +39,9 @@ inputs:
     formats:
       - json
     description: >
-      JSON request used by the eval harness. It may point to a caller-owned or
-      separately downloaded upstream example CT volume, or request deterministic
-      generated NIfTI wiring data and a mock response. The generated fixture is
-      not a model-quality demo.
+      JSON request pointing to a caller-owned or separately downloaded
+      upstream example CT volume. Populate the request template with an
+      existing authorized volume path before inference.
   - name: ct_volume
     type: file_path
     formats:
@@ -186,9 +185,14 @@ limitations:
     spacing metadata, but does not verify de-identification, Hounsfield-unit
     calibration, crop quality, anatomy coverage, or clinical correctness.
   - >
-    The committed fixture generates deterministic synthetic NIfTI wiring data
-    and a mock response under the run directory. Mock mode does not exercise
-    model preprocessing or inference and is not a model-quality demo.
+    The request template must be populated with an existing authorized volume
+    path before inference. No CT scans or model weights are bundled.
+  - >
+    Automatic reproducibility verification is preflight-only because the
+    request template contains no CT volume. Live repeatability requires staged
+    upstream examples, reviewed model assets, and a compatible GPU; use the
+    opt-in upstream-parity tests in tests/test_upstream_examples.py rather
+    than treating preflight success as completed model inference.
   - >
     Real-data integration and live end-to-end checks use the separately
     downloaded upstream Git LFS examples, not bundled CT images. GitHub access
@@ -237,8 +241,12 @@ validation:
     gpu_seconds: {max: 3600}
     gpu_memory_mb_peak: {max: 96000}
   reproducibility:
-    mode: repeat
-    fixture: fixtures/synthetic_ct_input.json
+    mode: preflight
+    fixture: fixtures/example_request.json
     runs: 2
-    env:
-      MOCK_NV_REASON_CT: "1"
+    reason: >
+      Live repeats require a separately staged authorized CT volume, reviewed
+      model assets, and a CUDA GPU. The committed request is a path template,
+      not executable demo data; only request/environment preflight is audited
+      automatically. tests/test_upstream_examples.py provides opt-in live
+      parity checks; EXAMPLES.md documents inference on the upstream volumes.

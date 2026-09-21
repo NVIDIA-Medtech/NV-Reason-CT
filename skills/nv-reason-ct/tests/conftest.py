@@ -3,8 +3,6 @@
 from pathlib import Path
 import re
 
-import nibabel as nib
-import numpy as np
 import pytest
 
 
@@ -47,18 +45,25 @@ def upstream_checkout(pytestconfig):
 
 
 @pytest.fixture
+def nifti_factory(request):
+    """Accept a test-infrastructure provider without importing repository tools."""
+    try:
+        return request.getfixturevalue("synthetic_nifti_factory")
+    except pytest.FixtureLookupError as exc:
+        if exc.argname != "synthetic_nifti_factory":
+            raise
+        pytest.skip(
+            "Synthetic fixture provider not loaded; run the repository test "
+            "target or supply the optional pytest provider. Upstream example "
+            "tests do not require it."
+        )
+
+
+@pytest.fixture
 def ct_input(request, tmp_path):
     """Use real examples for success paths when the caller supplies the data."""
     if request.param == "synthetic":
-        volume = tmp_path / "ct.nii.gz"
-        nib.save(
-            nib.Nifti1Image(
-                np.zeros((8, 9, 10), dtype=np.int16),
-                np.diag((-2.0, -2.0, 2.0, 1.0)),
-            ),
-            volume,
-        )
-        return volume
+        return request.getfixturevalue("nifti_factory")("ct.nii.gz")
     checkout = request.getfixturevalue("upstream_checkout")
     volume = checkout / "examples" / f"{request.param}.nii.gz"
     if not volume.is_file():

@@ -27,20 +27,8 @@ DEFAULT_REVISION = "main"
 DEFAULT_ANATOMY_REGION = "chest"
 DEFAULT_MAX_NEW_TOKENS = 2048
 ANATOMY_REGIONS = ("chest", "abdomen", "none")
-GENERATED_VOLUME_SENTINELS = {
-    "generated://synthetic_ct_volume",
-    "generated://synthetic_ct",
-}
 TRUTHY = {"1", "true", "yes", "on"}
 
-# This compact volume is generated only under a caller-selected output
-# directory. It is deterministic wiring data, not a clinical or demo case.
-SYNTHETIC_SHAPE = (64, 64, 96)
-SYNTHETIC_SPACING_MM = 2.0
-SYNTHETIC_BACKGROUND_HU = -1000
-SYNTHETIC_SOFT_TISSUE_HU = 40
-SYNTHETIC_LUNG_HU = -800
-SYNTHETIC_BONE_HU = 300
 HASH_BLOCK_BYTES = 1024 * 1024
 GIT_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
 
@@ -434,24 +422,6 @@ def _volume_info(path: Path) -> VolumeInfo:
     )
 
 
-def _write_synthetic_nifti(path: Path) -> None:
-    """Write deterministic mock-only CT-like wiring data."""
-    nib, np = _nifti_modules()
-    data = np.full(SYNTHETIC_SHAPE, SYNTHETIC_BACKGROUND_HU, dtype=np.int16)
-
-    # Rectangular regions are intentionally simple and deterministic. They
-    # exercise NIfTI I/O and metadata gates without claiming anatomical realism.
-    data[6:-6, 6:-6, 8:-8] = SYNTHETIC_SOFT_TISSUE_HU
-    data[14:30, 14:30, 20:82] = SYNTHETIC_LUNG_HU
-    data[34:50, 14:30, 20:82] = SYNTHETIC_LUNG_HU
-    data[30:34, 30:34, 12:88] = SYNTHETIC_BONE_HU
-
-    spacing = SYNTHETIC_SPACING_MM
-    affine = np.diag((-spacing, -spacing, spacing, 1.0))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(nib.Nifti1Image(data, affine), str(path))
-
-
 def _normalize_region(value: Any) -> str:
     region = str(value or DEFAULT_ANATOMY_REGION).strip().lower()
     if region not in ANATOMY_REGIONS:
@@ -476,7 +446,6 @@ def _fixture_bool(fixture: dict[str, Any], key: str, default: bool) -> bool:
 
 def _load_json_fixture(
     path: Path,
-    out_dir: Path,
     cli_prompt: str | None,
     cli_region: str | None,
     cli_enable_thinking: bool | None,
@@ -510,18 +479,20 @@ def _load_json_fixture(
     if fixture_mock_response is not None and not isinstance(fixture_mock_response, str):
         raise SkillError("fixture field mock_response must be a string when present")
 
-    if volume_value in GENERATED_VOLUME_SENTINELS:
-        volume_path = out_dir / "input_synthetic_ct.nii"
-        _write_synthetic_nifti(volume_path)
-        source = "generated_fixture"
-    elif volume_value:
+    if volume_value.startswith("generated://"):
+        raise SkillError(
+            "generated:// inputs are no longer supported; prepare test data "
+            "outside the skill and supply an existing NIfTI volume. "
+            "Use the upstream examples for end-to-end inference."
+        )
+    if volume_value:
         volume_path = Path(volume_value)
         if not volume_path.is_absolute():
             volume_path = (path.parent / volume_path).resolve()
         source = "fixture_file"
     else:
         raise SkillError(
-            "fixture must include volume_path or use generated://synthetic_ct_volume"
+            "request must include volume_path pointing to an existing NIfTI volume"
         )
 
     return InputSpec(
@@ -538,7 +509,6 @@ def _load_json_fixture(
 
 def _load_input(
     path: Path,
-    out_dir: Path,
     cli_prompt: str | None,
     cli_region: str | None,
     cli_enable_thinking: bool | None,
@@ -548,7 +518,6 @@ def _load_input(
     if path.suffix.lower() == ".json":
         return _load_json_fixture(
             path,
-            out_dir,
             cli_prompt,
             cli_region,
             cli_enable_thinking,
@@ -803,7 +772,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "volume_or_fixture",
         nargs="?",
         type=Path,
-        help=".nii/.nii.gz volume path, or JSON fixture for mock smoke tests.",
+        help="Existing .nii/.nii.gz volume, or JSON request pointing to one.",
     )
     parser.add_argument("--prompt", default=None, help="Text prompt for the model.")
     parser.add_argument(
@@ -888,7 +857,6 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         spec = _load_input(
             args.volume_or_fixture.resolve(),
-            out_dir,
             args.prompt,
             args.anatomy_region,
             args.enable_thinking,

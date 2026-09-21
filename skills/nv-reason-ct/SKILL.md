@@ -1,6 +1,6 @@
 ---
 name: nv-reason-ct
-description: Used for mock or live NV-Reason-CT inference on 3D NIfTI chest or abdominal CT volumes. Not for diagnosis, treatment, or clinical reporting.
+description: Run NV-Reason-CT inference on user-provided 3D NIfTI chest or abdominal CT volumes for engineering and research workflows. Not for diagnosis, treatment, or clinical reporting.
 license: OpenMDW-1.1
 allowed-tools: Bash, Read, Write, Env
 metadata:
@@ -18,7 +18,7 @@ metadata:
 - Runs the documented `nvidia/NV-Reason-CT` Hugging Face Transformers path on one user-provided 3D NIfTI CT volume and text prompt.
 - Emits `result_json` with input geometry and hash, anatomy-region selection, response text, runtime identity, dependency versions, and limitations.
 - Manifest I/O: inputs are `ct_request_or_fixture` and optional direct `ct_volume`; output is `result_json` on stdout.
-- Supports deterministic mock wiring checks. Not for diagnosis, treatment, triage, patient-facing output, or clinical reporting.
+- Not for diagnosis, treatment, triage, patient-facing output, or clinical reporting.
 
 ## Instructions
 
@@ -31,25 +31,18 @@ Tool scope: `Bash` runs the committed wrapper and documented setup commands; `Re
 
 ## Examples
 
-For the end-to-end example, follow [EXAMPLES.md](EXAMPLES.md) to download the upstream Git LFS volumes into a separate checkout, then run `examples/example_1.nii.gz` through the wrapper for both chest and abdomen. That scan covers both regions according to the upstream README. The guide also provides opt-in upstream-parity tests; it never substitutes synthetic data for live verification.
-
-Offline mock smoke test from the repository root (no model inference):
-
-```bash
-python skills/nv-reason-ct/scripts/run_nv_reason_ct.py \
-  skills/nv-reason-ct/fixtures/synthetic_ct_input.json \
-  --mock \
-  --out-dir runs/nv_reason_ct_smoke
-```
+For the end-to-end example, follow [EXAMPLES.md](EXAMPLES.md) to download the upstream Git LFS volumes into a separate checkout, then run `examples/example_1.nii.gz` through the wrapper for both chest and abdomen. That scan covers both regions according to the upstream README.
 
 Live inference on a chest CT:
 
 ```bash
-python skills/nv-reason-ct/scripts/run_nv_reason_ct.py PATH_TO_CT.nii.gz \
+env -u MOCK_NV_REASON_CT python skills/nv-reason-ct/scripts/run_nv_reason_ct.py PATH_TO_CT.nii.gz \
   --anatomy-region chest \
   --prompt "write a structured chest CT report" \
   --out-dir runs/nv_reason_ct_case
 ```
+
+Require exit `0`, `runtime.mode == "hf_transformers"`, `runtime.mock == false`, nonempty response text, and `runtime.truncated_by_max_new_tokens == false`. A JSON request may also point to the CT volume; replace `volume_path` in `fixtures/example_request.json` with an existing authorized file before running it.
 
 For an abdominal crop, pass `--anatomy-region abdomen`. Pass `--anatomy-region none` only for a manually cropped input; upstream preprocessing then uses a centered crop. Pass `--no-thinking` for a concise response without thinking output.
 
@@ -61,7 +54,7 @@ Each invocation loads the model and starts a new single-turn conversation. The u
 
 | Script | Purpose | Arguments |
 |---|---|---|
-| `scripts/run_nv_reason_ct.py` | Primary NIfTI preflight, mock, setup-check, and live inference entrypoint. | `CT_OR_FIXTURE [--anatomy-region chest|abdomen|none] [--prompt TEXT] [--thinking|--no-thinking] [--mock] [--out-dir OUT_DIR]` |
+| `scripts/run_nv_reason_ct.py` | Read-only setup checks and inference on an existing NIfTI volume. | `CT_OR_REQUEST [--anatomy-region chest|abdomen|none] [--prompt TEXT] [--thinking|--no-thinking] [--out-dir OUT_DIR]`; `--check-setup` needs no CT input. |
 
 ## Prerequisites
 
@@ -111,13 +104,12 @@ The live CUDA path was reverified on 2026-09-21 with the upstream `examples/exam
 | huggingface-hub | `1.30.0` |
 | packaging | `25.0` |
 
-The verified inference settings were one 48 GB NVIDIA RTX 6000 Ada GPU (driver `580.178.04`), bfloat16 model weights, SDPA attention, deterministic decoding (`do_sample=False`), thinking enabled, and `max_new_tokens=2048`. The upstream example generated 438 tokens with the chest crop and 453 with the abdomen crop; neither response was truncated. Both matched the upstream CLI after trimming surrounding whitespace, using the same reviewed immutable model revision and offline assets in a disposable environment. All three upstream volumes also passed input/geometry/hash checks. See [BENCHMARK.md](BENCHMARK.md) for the evidence boundary. This verifies inference wiring, not clinical correctness. Lower-memory GPUs and other PyTorch/CUDA combinations have not yet been verified by this skill.
+The verified inference settings were one 48 GB NVIDIA RTX 6000 Ada GPU (driver `580.178.04`), bfloat16 model weights, SDPA attention, deterministic decoding (`do_sample=False`), thinking enabled, and `max_new_tokens=2048`. The upstream example generated 438 tokens with the chest crop and 453 with the abdomen crop; neither response was truncated. Both matched the upstream CLI after trimming surrounding whitespace, using the same reviewed immutable model revision and offline assets in a disposable environment. All three upstream volumes also passed input/geometry/hash checks. This is a recorded baseline, not a fresh run of every subsequent skill revision. It verifies inference wiring, not clinical correctness. Lower-memory GPUs and other PyTorch/CUDA combinations have not yet been verified by this skill.
 
 Environment variables:
 
 | Variable | When to use |
 |---|---|
-| `MOCK_NV_REASON_CT` | Set to `1` for deterministic mock checks without model inference. |
 | `NV_REASON_CT_MODEL` | Override the Hugging Face model id for an explicit compatibility probe. |
 | `NV_REASON_CT_REVISION` | Select a reviewed model revision; prefer an immutable revision for evidence runs. |
 | `HF_HOME` | Point to a caller-managed Hugging Face cache. |
@@ -130,14 +122,14 @@ Environment variables:
 | `HF_HUB_OFFLINE` | Set to `1` only after all Hugging Face assets are cached. |
 | `CUDA_VISIBLE_DEVICES` | Restrict which GPU the wrapper may use. |
 
-Live mode uses the upstream contract: `AutoModelForImageTextToText` and `AutoProcessor` with `trust_remote_code=True`, bfloat16, SDPA attention, `images3d=[CT_PATH]`, deterministic generation, and anatomy-aware chest or abdomen cropping. Each run resolves the requested revision once and uses that immutable commit for model weights, processor assets, and custom code. Output retains the requested `runtime.revision` and records the commit in `runtime.resolved_revision` (`null` in mock mode). Keep private revision identifiers in local evidence until approved for disclosure.
+Inference uses the upstream contract: `AutoModelForImageTextToText` and `AutoProcessor` with `trust_remote_code=True`, bfloat16, SDPA attention, `images3d=[CT_PATH]`, deterministic generation, and anatomy-aware chest or abdomen cropping. Each run resolves the requested revision once and uses that immutable commit for model weights, processor assets, and custom code. Output retains the requested `runtime.revision` and records the commit in `runtime.resolved_revision`. Keep private revision identifiers in local evidence until approved for disclosure.
 
 ## Limitations
 
 - The wrapper loads upstream custom code. Use an isolated environment and an immutable reviewed revision for evidence runs.
 - It checks readable 3D NIfTI structure, positive voxel spacing, a finite affine, and file identity. It does not verify de-identification, Hounsfield-unit calibration, anatomy coverage, crop quality, or clinical correctness.
 - Model output can hallucinate, omit findings, or present unreliable reasoning. Reviewable reasoning text is generated output, not proof of the model's internal computation.
-- The committed fixture remains a compact synthetic, mock-only offline check. Real-data integration and end-to-end examples use separately downloaded upstream volumes; no CT images or model weights are bundled. Neither kind of check establishes clinical correctness.
+- CT scans and model weights must be supplied separately. The upstream examples demonstrate inference wiring and provide no clinical ground truth. A successful setup check is not completed model inference.
 - The moving `main` revision is suitable only for development. Replace it with the reviewed immutable public release revision before publication.
 - This wrapper does not cover the Gradio UI, finetuning, retraining, clinical deployment, or patient-facing use.
 
@@ -148,9 +140,9 @@ Live mode uses the upstream contract: `AutoModelForImageTextToText` and `AutoPro
 | Dependency mismatch in `--check-setup` | The environment differs from the model-card requirements. | Create a fresh environment and install the upstream requirements exactly. |
 | Authentication or repository-not-found error | Model assets are not public or the current account lacks access. | Set an authorized `HF_TOKEN`; do not copy tokens into commands, fixtures, or logs. |
 | Cache is incomplete in `--check-setup` | The selected revision or some of its required assets are absent. | Inspect `missing_files`, then download the selected revision with authorized access before enabling offline mode. Files cached for another revision do not satisfy this check. |
-| CUDA unavailable or bfloat16 unsupported | Live inference is running on an unsupported device or isolated GPU context. | Use a compatible CUDA host; use `--mock` only for wiring checks. |
+| CUDA unavailable or bfloat16 unsupported | Inference is running on an unsupported device or isolated GPU context. | Use a compatible CUDA host before retrying inference. |
 | NIfTI shape or spacing error | Input is unreadable, 4D, or has invalid geometry metadata. | Supply one 3D `.nii` or `.nii.gz` CT volume with valid spacing and affine metadata. |
-| Git LFS pointer instead of a CT volume | The checkout contains the small pointer file, not the NIfTI data. | Run `git lfs pull --include="examples/*.nii.gz"` in the upstream checkout, then retry. Do not substitute a synthetic volume for the end-to-end test. |
+| Git LFS pointer instead of a CT volume | The checkout contains the small pointer file, not the NIfTI data. | Run `git lfs pull --include="examples/*.nii.gz"` in the upstream checkout, then retry. |
 | Poor chest or abdomen crop | Automatic anatomy heuristics do not fit the scan geometry. | Inspect upstream preprocessing, manually crop the CT, and pass `--anatomy-region none`. |
 | Empty or truncated response | Generation stopped without text, or reached the token limit without EOS (exit `3`). | Preserve any partial JSON and stderr; do not treat it as a completed response. Verify setup and input, then adjust `--max-new-tokens` if truncation is reported. |
 

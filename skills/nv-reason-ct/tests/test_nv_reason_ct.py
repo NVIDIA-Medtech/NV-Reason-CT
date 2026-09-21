@@ -2,7 +2,8 @@
 
 These tests exercise input handling, deterministic mock output, and clean
 failure paths. Success paths use all three upstream volumes when supplied via
---nv-reason-ct-upstream; otherwise they use small synthetic data. No weights run.
+--nv-reason-ct-upstream; otherwise the repository test provider supplies inputs.
+This skill never generates NIfTI data. No weights run.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ import yaml
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SCRIPT = SKILL_DIR / "scripts" / "run_nv_reason_ct.py"
-FIXTURE = SKILL_DIR / "fixtures" / "synthetic_ct_input.json"
 TEST_COMMIT = "a" * 40
 # Keep this audited shell contract independent of the documentation under test.
 # Stub executables do not sandbox shell builtins or absolute command paths.
@@ -109,11 +109,6 @@ def _run(*args: str | Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _write_nifti(path: Path, shape: tuple[int, ...] = (8, 9, 10)) -> None:
-    data = np.zeros(shape, dtype=np.int16)
-    nib.save(nib.Nifti1Image(data, np.diag((-2.0, -2.0, 2.0, 1.0))), path)
-
-
 def test_eval_fixtures_resolve_inside_evals():
     evals_dir = SKILL_DIR / "evals"
     dataset = json.loads((evals_dir / "evals.json").read_text())
@@ -126,16 +121,11 @@ def test_eval_fixtures_resolve_inside_evals():
             assert resolved.is_file(), f"Missing eval fixture: {name}"
 
 
-def test_eval_fixture_matches_offline_smoke_fixture():
-    # Tier 3 accepts only files contained in evals/. Keep its small synthetic
-    # attachment identical to the runtime fixture; never copy a real CT here.
-    assert (
-        SKILL_DIR / "evals" / "files" / "synthetic_ct_input.json"
-    ).read_bytes() == FIXTURE.read_bytes()
-
-
-def test_json_fixture_mock_generates_valid_output(tmp_path: Path) -> None:
-    proc = _run(FIXTURE, "--out-dir", tmp_path / "out")
+def test_json_request_mock_uses_existing_input(tmp_path: Path, ct_input: Path) -> None:
+    fixture = tmp_path / "request.json"
+    fixture.write_text(json.dumps({"volume_path": str(ct_input)}))
+    original_bytes = ct_input.read_bytes()
+    proc = _run(fixture, "--mock", "--out-dir", tmp_path / "out")
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["skill"] == "nv_reason_ct"
@@ -148,12 +138,37 @@ def test_json_fixture_mock_generates_valid_output(tmp_path: Path) -> None:
     assert payload["runtime"]["generated_tokens"] == 0
     assert payload["input"]["anatomy_region"] == "chest"
     assert payload["input"]["enable_thinking"] is True
-    assert payload["input"]["volume"]["source"] == "generated_fixture"
+    assert payload["input"]["volume"]["source"] == "fixture_file"
     assert payload["input"]["volume"]["format"] == "nifti"
     assert payload["input"]["volume"]["ndim"] == 3
     assert len(payload["input"]["volume"]["shape"]) == 3
     assert Path(payload["input"]["volume"]["path"]).exists()
     assert payload["output"]["response_text"]
+    assert ct_input.read_bytes() == original_bytes
+    assert not list((tmp_path / "out").rglob("*.nii*"))
+
+
+@pytest.mark.parametrize(
+    "uri", ["generated://synthetic_ct_volume", "generated://synthetic_ct"]
+)
+@pytest.mark.parametrize("mock", [False, True])
+def test_generated_inputs_never_reach_loading_or_inference(
+    wrapper, monkeypatch, tmp_path, capsys, uri, mock
+):
+    fixture = tmp_path / "legacy.json"
+    fixture.write_text(json.dumps({"volume_path": uri, "mock": mock}))
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("generated input reached volume loading or inference")
+
+    monkeypatch.setattr(wrapper, "_volume_info", unexpected_call)
+    monkeypatch.setattr(wrapper, "_run_transformers_inference", unexpected_call)
+    args = [str(fixture), "--out-dir", str(tmp_path / "out")]
+    assert wrapper.main(args + (["--mock"] if mock else [])) == 2
+    captured = capsys.readouterr()
+    assert "generated:// inputs are no longer supported" in captured.err
+    assert not captured.out
+    assert not list(tmp_path.rglob("*.nii*"))
 
 
 def test_check_setup_reports_json() -> None:
@@ -257,9 +272,22 @@ def test_direct_nifti_mock_path(tmp_path: Path, ct_input: Path) -> None:
     assert payload["input"]["prompt"].startswith("Summarize")
 
 
-def test_cli_overrides_fixture_region_and_thinking(tmp_path: Path) -> None:
+def test_cli_overrides_fixture_region_and_thinking(
+    tmp_path: Path, ct_input: Path
+) -> None:
+    fixture = tmp_path / "request.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "volume_path": str(ct_input),
+                "anatomy_region": "chest",
+                "enable_thinking": True,
+            }
+        )
+    )
     proc = _run(
-        FIXTURE,
+        fixture,
+        "--mock",
         "--anatomy-region",
         "none",
         "--no-thinking",
@@ -308,9 +336,8 @@ def test_unreadable_volume_fails_cleanly(wrapper, tmp_path, monkeypatch):
         wrapper._volume_info(volume)
 
 
-def test_rejects_4d_nifti(tmp_path: Path) -> None:
-    volume = tmp_path / "four_dimensional.nii.gz"
-    _write_nifti(volume, shape=(4, 5, 6, 2))
+def test_rejects_4d_nifti(tmp_path: Path, nifti_factory) -> None:
+    volume = nifti_factory("four_dimensional.nii.gz", shape=(4, 5, 6, 2))
     proc = _run(volume, "--mock", "--out-dir", tmp_path / "out")
     assert proc.returncode == 2
     assert "requires one 3D NIfTI volume" in proc.stderr
@@ -585,10 +612,9 @@ def test_unresolvable_revision_fails_cleanly(wrapper, monkeypatch):
 
 @pytest.mark.parametrize("truncated", [False, True])
 def test_live_cli_preserves_json_and_returns_completion_status(
-    wrapper, monkeypatch, tmp_path, capsys, truncated
+    wrapper, monkeypatch, tmp_path, capsys, truncated, ct_input
 ):
-    volume = tmp_path / "ct.nii"
-    _write_nifti(volume)
+    volume = ct_input
     monkeypatch.delenv("MOCK_NV_REASON_CT", raising=False)
     monkeypatch.setattr(
         wrapper,
@@ -819,6 +845,6 @@ def test_live_version_check_rejects_missing_or_old_minimum(
 def test_default_prompt_matches_upstream_cli(
     wrapper, tmp_path, ct_input, region, prompt
 ):
-    spec = wrapper._load_input(ct_input, tmp_path, None, region, None)
+    spec = wrapper._load_input(ct_input, None, region, None)
     assert spec.prompt == prompt
     assert spec.enable_thinking is True
