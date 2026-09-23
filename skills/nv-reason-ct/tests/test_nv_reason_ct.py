@@ -1,17 +1,11 @@
-"""Smoke tests for the NV-Reason-CT wrapper.
+"""Self-contained offline contract tests; no CT generator, model, or downloads.
 
-These tests exercise input handling, deterministic mock output, and clean
-failure paths. Success paths use all three upstream volumes when supplied via
---nv-reason-ct-upstream; otherwise the repository test provider supplies inputs.
-This skill never generates NIfTI data. No weights run.
+Test doubles exercise loader/inference boundaries. Real-volume and CUDA parity
+checks are explicitly opt-in in test_upstream_examples.py, never fallbacks.
 """
 
-from __future__ import annotations
-
 import hashlib
-import importlib.util
 import json
-import os
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -19,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import jsonschema
-import nibabel as nib
 import numpy as np
 import pytest
 import yaml
@@ -27,85 +20,106 @@ import yaml
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SCRIPT = SKILL_DIR / "scripts" / "run_nv_reason_ct.py"
 TEST_COMMIT = "a" * 40
-# Keep this audited shell contract independent of the documentation under test.
-# Stub executables do not sandbox shell builtins or absolute command paths.
-EXPECTED_INSTALL_COMMAND = r'''python -m pip install "huggingface_hub>=1.5,<2" &&
-nv_reason_ct_prereqs="$(mktemp -d)" &&
-hf download nvidia/NV-Reason-CT requirements.txt \
-  --revision "${NV_REASON_CT_REVISION:-main}" --local-dir "$nv_reason_ct_prereqs" &&
-python -m pip install -r "$nv_reason_ct_prereqs/requirements.txt" "torch>=2.9.0"'''
 
 
-def _validated_install_command(command: str) -> str:
-    if command.strip() != EXPECTED_INSTALL_COMMAND:
-        raise ValueError("install command changed; review its shell operations first")
-    return command
-
-
-@pytest.fixture
-def wrapper(monkeypatch):
-    spec = importlib.util.spec_from_file_location("nv_reason_ct_test_wrapper", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    return module
+def _validate(payload):
+    schema = json.loads((SKILL_DIR / "validators/output_schema.json").read_text())
+    jsonschema.validate(payload, schema)
 
 
 @pytest.fixture
 def ready_setup(wrapper, monkeypatch):
+    monkeypatch.setattr(wrapper, "_installed_version", lambda _: "test-build")
     monkeypatch.setattr(
         wrapper,
         "_package_status",
         lambda name, _: {
             "installed": True,
             "importable": True,
-            "version": wrapper.EXACT_UPSTREAM_VERSIONS.get(
-                name, wrapper.MINIMUM_UPSTREAM_VERSIONS.get(name, "1.0")
-            ),
+            "version": wrapper._installed_version(name),
         },
     )
     monkeypatch.setattr(
-        wrapper,
-        "_cuda_report",
-        lambda: {"available": True, "bfloat16_supported": True},
+        wrapper, "_cuda_report", lambda: {"available": True, "bfloat16_supported": True}
     )
     return wrapper
 
 
-def _cache_snapshot(tmp_path, commit, refs, filenames):
-    snapshot_path = tmp_path / "snapshots" / commit
-    files = []
-    for filename in filenames:
-        path = snapshot_path / filename
+@pytest.fixture
+def inference_double(wrapper, monkeypatch):
+    calls = []
+    runtime = {
+        "device": "cuda",
+        "torch_dtype": "bfloat16",
+        "transformers_version": "test",
+        "torch_version": "test",
+        "generated_tokens": 1,
+        "truncated_by_max_new_tokens": False,
+    }
+
+    def infer(**kwargs):
+        calls.append(kwargs)
+        return "test-double response", {
+            **runtime,
+            "resolved_revision": TEST_COMMIT if kwargs["revision"] else None,
+        }
+
+    monkeypatch.setattr(wrapper, "_run_transformers_inference", infer)
+    return calls, runtime
+
+
+def _snapshot(tmp_path, wrapper, missing=(), shards=False):
+    snapshot = tmp_path / "snapshots" / TEST_COMMIT
+    names = set(wrapper.REQUIRED_MODEL_FILES) | {
+        "model.safetensors.index.json" if shards else "model.safetensors"
+    }
+    for name in names - set(missing):
+        path = snapshot / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}")
-        files.append(SimpleNamespace(file_path=path, size_on_disk=path.stat().st_size))
-    return SimpleNamespace(
-        commit_hash=commit,
-        refs=set(refs),
-        snapshot_path=snapshot_path,
-        files=files,
-        size_on_disk=sum(f.size_on_disk for f in files),
-    )
+    return snapshot
 
 
-def _stub_cache(monkeypatch, *snapshots):
-    repo = SimpleNamespace(
-        repo_id="nvidia/NV-Reason-CT", repo_type="model", revisions=snapshots
-    )
+def _stub_snapshot(monkeypatch, snapshot):
+    def download(model_id, **kwargs):
+        assert model_id == "nvidia/NV-Reason-CT"
+        assert kwargs["local_files_only"] is True and kwargs["token"] is False
+        if snapshot is None or kwargs["revision"] not in ("main", TEST_COMMIT):
+            raise FileNotFoundError("requested revision is not cached")
+        return str(snapshot)
+
+    # No scan_cache_dir: setup must inspect only this snapshot.
     monkeypatch.setitem(
-        sys.modules,
-        "huggingface_hub",
-        SimpleNamespace(scan_cache_dir=lambda: SimpleNamespace(repos=[repo])),
+        sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download)
     )
 
 
-def _run(*args: str | Path) -> subprocess.CompletedProcess[str]:
+def _run(*args):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *(str(arg) for arg in args)],
+        [sys.executable, str(SCRIPT), *map(str, args)],
         capture_output=True,
         text=True,
         timeout=30,
+    )
+
+
+def test_dependency_inventory_matches_import_allowlist_without_version_constraints(
+    wrapper,
+):
+    manifest = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())
+    runtime = manifest["runtime"]
+    expected = {name.lower().replace("_", "-") for name in wrapper.DEPENDENCY_IMPORTS}
+    assert {
+        name.lower().replace("_", "-") for name in runtime["dependencies"]
+    } == expected
+    assert {
+        name.lower().replace("_", "-")
+        for name in runtime["side_effects"]["pip_packages"]
+    } == expected
+    assert set(runtime["dependencies"].values()) == {"*"}
+    assert not manifest["validation"].get("env_pin")
+    assert (
+        runtime["external_assets"][0]["installation_url"] == wrapper.UPSTREAM_SETUP_URL
     )
 
 
@@ -117,69 +131,271 @@ def test_eval_fixtures_resolve_inside_evals():
             path = Path(name)
             assert not path.is_absolute() and ".." not in path.parts
             resolved = (evals_dir / path).resolve()
-            assert resolved.is_relative_to(evals_dir.resolve())
-            assert resolved.is_file(), f"Missing eval fixture: {name}"
+            assert resolved.is_relative_to(evals_dir.resolve()) and resolved.is_file()
 
 
-def test_json_request_mock_uses_existing_input(tmp_path: Path, ct_input: Path) -> None:
-    fixture = tmp_path / "request.json"
-    fixture.write_text(json.dumps({"volume_path": str(ct_input)}))
-    original_bytes = ct_input.read_bytes()
-    proc = _run(fixture, "--mock", "--out-dir", tmp_path / "out")
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["skill"] == "nv_reason_ct"
-    assert payload["runtime"]["mock"] is True
-    assert payload["runtime"]["mode"] == "mock"
-    assert payload["runtime"]["model"] == "nvidia/NV-Reason-CT"
-    assert payload["runtime"]["resolved_revision"] is None
-    assert payload["runtime"]["attention_implementation"] == "sdpa"
-    assert payload["runtime"]["trust_remote_code"] is True
-    assert payload["runtime"]["generated_tokens"] == 0
-    assert payload["input"]["anatomy_region"] == "chest"
-    assert payload["input"]["enable_thinking"] is True
-    assert payload["input"]["volume"]["source"] == "fixture_file"
-    assert payload["input"]["volume"]["format"] == "nifti"
-    assert payload["input"]["volume"]["ndim"] == 3
-    assert len(payload["input"]["volume"]["shape"]) == 3
-    assert Path(payload["input"]["volume"]["path"]).exists()
-    assert payload["output"]["response_text"]
-    assert ct_input.read_bytes() == original_bytes
-    assert not list((tmp_path / "out").rglob("*.nii*"))
+@pytest.mark.parametrize("json_request", [False, True])
+def test_cli_input_contract(
+    wrapper, volume_double, inference_double, tmp_path, capsys, json_request
+):
+    volume, image = volume_double
+    original = volume.read_bytes()
+    input_path = volume
+    if json_request:
+        input_path = tmp_path / "request.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "volume_path": volume.name,
+                    "prompt": "request prompt",
+                    "anatomy_region": "chest",
+                    "enable_thinking": True,
+                }
+            )
+        )
+    assert (
+        wrapper.main(
+            [
+                str(input_path),
+                "--trust-model-code",
+                "--anatomy-region",
+                "abdomen",
+                "--no-thinking",
+                "--prompt",
+                "caller prompt",
+                "--out-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert not captured.err
+    payload = json.loads(captured.out)
+    _validate(payload)
+    assert payload["input"]["prompt"] == "caller prompt"
+    assert payload["input"]["anatomy_region"] == "abdomen"
+    assert payload["input"]["enable_thinking"] is False
+    metadata = payload["input"]["volume"]
+    assert metadata["source"] == ("fixture_file" if json_request else "file")
+    assert metadata["shape"] == list(image.shape)
+    assert metadata["spacing_mm"] == list(image.header.get_zooms())
+    assert metadata["sha256"] == hashlib.sha256(original).hexdigest()
+    assert volume.read_bytes() == original and not (tmp_path / "out").exists()
+    assert inference_double[0][0]["volume_path"] == volume
+    assert inference_double[0][0]["trust_model_code"] is True
 
 
 @pytest.mark.parametrize(
-    "uri", ["generated://synthetic_ct_volume", "generated://synthetic_ct"]
+    "region,prompt",
+    [
+        ("chest", "write a structured chest CT report"),
+        ("abdomen", "write a structured abdominal CT report"),
+        ("none", "Describe this CT volume."),
+    ],
 )
-@pytest.mark.parametrize("mock", [False, True])
-def test_generated_inputs_never_reach_loading_or_inference(
-    wrapper, monkeypatch, tmp_path, capsys, uri, mock
+def test_default_prompt(wrapper, volume_double, region, prompt):
+    spec = wrapper._load_input(volume_double[0], None, region, None)
+    assert spec.prompt == prompt and spec.enable_thinking is True
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("mock", True),
+        ("mock_response", "caller text"),
+        ("unknown", 1),
+        ("trust_model_code", True),
+    ],
+)
+def test_unknown_request_fields_are_rejected(wrapper, tmp_path, capsys, field, value):
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"volume_path": "missing.nii", field: value}))
+    assert wrapper.main([str(request), "--trust-model-code"]) == 2
+    assert "unsupported request fields" in capsys.readouterr().err
+
+
+def test_legacy_environment_cannot_bypass_inference(
+    wrapper, volume_double, inference_double, monkeypatch, capsys
 ):
-    fixture = tmp_path / "legacy.json"
-    fixture.write_text(json.dumps({"volume_path": uri, "mock": mock}))
+    monkeypatch.setenv("MOCK_NV_REASON_CT", "1")
+    assert wrapper.main([str(volume_double[0]), "--trust-model-code"]) == 0
+    assert len(inference_double[0]) == 1
+    assert json.loads(capsys.readouterr().out)["runtime"]["mock"] is False
 
-    def unexpected_call(*args, **kwargs):
-        pytest.fail("generated input reached volume loading or inference")
 
-    monkeypatch.setattr(wrapper, "_volume_info", unexpected_call)
-    monkeypatch.setattr(wrapper, "_run_transformers_inference", unexpected_call)
-    args = [str(fixture), "--out-dir", str(tmp_path / "out")]
-    assert wrapper.main(args + (["--mock"] if mock else [])) == 2
+@pytest.mark.parametrize("args", [["--mock"], ["--device", "auto"]])
+def test_removed_cli_switches_fail_explicitly(args):
+    proc = _run(*args)
+    assert proc.returncode == 2 and "unrecognized arguments" in proc.stderr
+
+
+@pytest.mark.parametrize("content", [b"\xff\xfe", b"{broken", b"[]"])
+def test_invalid_json_request_fails_cleanly(tmp_path, content):
+    request = tmp_path / "request.json"
+    request.write_bytes(content)
+    out = tmp_path / "unused-output"
+    proc = _run(request, "--out-dir", out, "--trust-model-code")
+    assert proc.returncode == 2 and "error:" in proc.stderr
+    assert "Traceback" not in proc.stderr and not proc.stdout and not out.exists()
+
+
+@pytest.mark.parametrize("target", ["request", "volume", "hash"])
+def test_unreadable_input_fails_cleanly(
+    wrapper, volume_double, monkeypatch, tmp_path, capsys, target
+):
+    volume = volume_double[0]
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"volume_path": str(volume)}))
+    original_open = Path.open
+    volume_reads = 0
+
+    def open_file(path, *args, **kwargs):
+        nonlocal volume_reads
+        if path == volume:
+            volume_reads += 1
+        if (
+            (target == "request" and path == request)
+            or (target == "volume" and path == volume)
+            or (target == "hash" and path == volume and volume_reads == 2)
+        ):
+            raise PermissionError("test input is unreadable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    assert wrapper.main([str(request), "--trust-model-code"]) == 2
     captured = capsys.readouterr()
-    assert "generated:// inputs are no longer supported" in captured.err
+    assert "unreadable" in captured.err and "Traceback" not in captured.err
     assert not captured.out
-    assert not list(tmp_path.rglob("*.nii*"))
 
 
-def test_check_setup_reports_json() -> None:
-    proc = _run("--check-setup")
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["skill"] == "nv_reason_ct"
-    assert payload["setup"]["model"] == "nvidia/NV-Reason-CT"
-    assert payload["setup"]["revision"] == "main"
-    assert "dependencies" in payload["setup"]
-    assert "recommendation" in payload["setup"]
+@pytest.mark.parametrize(
+    "name,content,error",
+    [
+        ("bad.txt", b"text", "expected .nii or .nii.gz"),
+        (
+            "pointer.nii.gz",
+            b"version https://git-lfs.github.com/spec/v1\n",
+            "Git LFS pointer",
+        ),
+        ("bad.nii", b"not an image", "could not read NIfTI volume"),
+    ],
+)
+def test_invalid_volume_fails_cleanly(tmp_path, name, content, error):
+    volume = tmp_path / name
+    volume.write_bytes(content)
+    proc = _run(volume, "--out-dir", tmp_path / "out", "--trust-model-code")
+    assert proc.returncode == 2 and error in proc.stderr
+    assert "Traceback" not in proc.stderr and not proc.stdout
+    assert not (tmp_path / "out").exists()
+
+
+def test_missing_input_fails_cleanly(tmp_path):
+    proc = _run(
+        tmp_path / "missing.nii.gz", "--out-dir", tmp_path / "out", "--trust-model-code"
+    )
+    assert proc.returncode == 2 and "input not found" in proc.stderr
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("shape", [(4, 5, 6, 2), (4, 5), (4, 0, 6)])
+def test_invalid_dimensions(wrapper, volume_double, shape):
+    volume, image = volume_double
+    image.shape = shape
+    with pytest.raises(wrapper.SkillError, match="requires one 3D NIfTI volume"):
+        wrapper._volume_info(volume)
+
+
+@pytest.mark.parametrize(
+    "spacing", [(0, 1, 2), (-1, 1, 2), (float("nan"), 1, 2), (1, 2)]
+)
+def test_invalid_spacing(wrapper, volume_double, spacing):
+    volume, image = volume_double
+    image.header.get_zooms = lambda: spacing
+    with pytest.raises(wrapper.SkillError, match="three positive values"):
+        wrapper._volume_info(volume)
+
+
+def test_invalid_affine(wrapper, volume_double):
+    volume, image = volume_double
+    image.affine[0, 0] = np.inf
+    with pytest.raises(wrapper.SkillError, match="non-finite"):
+        wrapper._volume_info(volume)
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+@pytest.mark.parametrize(
+    "out_kind", ["new-directory", "existing-file", "permission-error"]
+)
+def test_completion_and_output_filesystem_contract(
+    wrapper,
+    volume_double,
+    inference_double,
+    tmp_path,
+    capsys,
+    monkeypatch,
+    truncated,
+    out_kind,
+):
+    inference_double[1]["truncated_by_max_new_tokens"] = truncated
+    out = tmp_path / "out"
+    if out_kind == "existing-file":
+        out.write_text("preserve me")
+    if out_kind == "permission-error":
+        original = Path.mkdir
+
+        def mkdir(path, *args, **kwargs):
+            if path == out:
+                raise PermissionError("test output is not writable")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+    code = wrapper.main(
+        [
+            str(volume_double[0]),
+            "--out-dir",
+            str(out),
+            "--max-new-tokens",
+            "1",
+            "--trust-model-code",
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    _validate(payload)
+    assert code == (3 if truncated else 0)
+    assert payload["runtime"]["truncated_by_max_new_tokens"] is truncated
+    assert "Traceback" not in captured.err
+    if truncated and out_kind == "new-directory":
+        partial = Path(payload["output"]["partial_json_path"])
+        assert partial.parent == out and json.loads(partial.read_text()) == payload
+        assert str(partial) in captured.err
+    else:
+        assert "partial_json_path" not in payload["output"]
+        assert ("retain stdout" in captured.err) is truncated
+    if out_kind == "existing-file":
+        assert out.read_text() == "preserve me"
+    elif not truncated:
+        assert not out.exists()
+    checks = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())[
+        "validation"
+    ]["sanity_checks"]
+    assert {"path": "runtime.truncated_by_max_new_tokens", "eq": False} in checks
+    for invalid_revision in (None, "main"):
+        payload["runtime"]["resolved_revision"] = invalid_revision
+        with pytest.raises(jsonschema.ValidationError):
+            _validate(payload)
+
+
+def test_partial_results_do_not_overwrite_previous_attempts(wrapper, tmp_path):
+    payload = {"output": {"response_text": "first attempt"}}
+    wrapper._preserve_partial_result(payload, tmp_path)
+    first_path = Path(payload["output"]["partial_json_path"])
+    first_bytes = first_path.read_bytes()
+    payload["output"]["response_text"] = "second attempt"
+    wrapper._preserve_partial_result(payload, tmp_path)
+    assert Path(payload["output"]["partial_json_path"]) != first_path
+    assert first_path.read_bytes() == first_bytes
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -188,11 +404,9 @@ def test_check_setup_reports_json() -> None:
     [
         "ready_for_live_cuda_inference",
         "install_or_repair_upstream_dependencies",
-        "use_the_upstream_exact_dependency_versions",
-        "use_the_upstream_minimum_dependency_versions",
-        "use_a_cuda_host_or_mock_mode",
+        "use_a_cuda_host",
         "use_a_cuda_gpu_with_bfloat16_support",
-        "download_model_assets_or_disable_local_files_only",
+        "stage_complete_model_and_processor_assets",
     ],
 )
 def test_setup_readiness_exit_contract(
@@ -200,30 +414,109 @@ def test_setup_readiness_exit_contract(
 ):
     report = {"skill": "nv_reason_ct", "setup": {"recommendation": recommendation}}
     monkeypatch.setattr(wrapper, "_setup_report", lambda *_: report)
+    monkeypatch.setattr(
+        wrapper,
+        "_require_model_code_consent",
+        lambda *_: pytest.fail("setup must not require code consent"),
+    )
     args = ["--check-setup"] + (["--fail-on-not-ready"] if strict else [])
-    code = wrapper.main(args)
-    captured = capsys.readouterr()
-    assert code == int(strict and recommendation != "ready_for_live_cuda_inference")
-    assert json.loads(captured.out) == report
-    assert not captured.err
+    assert wrapper.main(args) == int(
+        strict and recommendation != "ready_for_live_cuda_inference"
+    )
+    assert json.loads(capsys.readouterr().out) == report
 
 
-def test_strict_readiness_requires_setup_mode(wrapper, capsys):
-    assert wrapper.main(["--fail-on-not-ready"]) == 2
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("input_kind", ["volume", "request"])
+def test_cli_refuses_model_code_without_explicit_flag(
+    wrapper, monkeypatch, tmp_path, capsys, local, input_kind
+):
+    # Neither environment settings nor a request-file claim can authorize code.
+    monkeypatch.setenv("TRUST_REMOTE_CODE", "true")
+    monkeypatch.setenv("NV_REASON_CT_TRUST_MODEL_CODE", "1")
+    model = tmp_path / "model"
+    model.mkdir()
+    input_path = tmp_path / "input.nii.gz"
+    if input_kind == "request":
+        input_path = tmp_path / "request.json"
+        input_path.write_text(
+            json.dumps({"volume_path": "input.nii.gz", "trust_model_code": True})
+        )
+    for name in (
+        "_load_input",
+        "_resolve_model_revision",
+        "_run_transformers_inference",
+    ):
+        monkeypatch.setattr(
+            wrapper,
+            name,
+            lambda *_, **__: pytest.fail("consent must precede input/model work"),
+        )
+    out = tmp_path / "out"
+    args = [str(input_path), "--out-dir", str(out), "--local-files-only"]
+    args += ["--model", str(model)] if local else ["--revision", TEST_COMMIT]
+    assert wrapper.main(args) == 2
     captured = capsys.readouterr()
-    assert not captured.out
-    assert "requires --check-setup" in captured.err
+    assert "--trust-model-code" in captured.err and "permissions" in captured.err
+    assert not captured.out and "Traceback" not in captured.err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("revision", [None, TEST_COMMIT])
+@pytest.mark.parametrize("consent", [{}, {"trust_model_code": False}])
+def test_direct_inference_call_is_also_fail_closed(
+    wrapper, monkeypatch, tmp_path, revision, consent
+):
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    monkeypatch.setattr(
+        wrapper,
+        "_resolve_model_revision",
+        lambda *_, **__: pytest.fail("must not resolve assets"),
+    )
+    with pytest.raises(wrapper.SkillError, match="--trust-model-code"):
+        wrapper._run_transformers_inference(
+            volume_path=tmp_path / "input.nii.gz",
+            prompt="test",
+            anatomy_region="chest",
+            enable_thinking=True,
+            model_id=str(tmp_path) if revision is None else wrapper.DEFAULT_MODEL,
+            revision=revision,
+            max_new_tokens=3,
+            local_files_only=True,
+            **consent,
+        )
+
+
+def test_default_manifest_does_not_grant_model_code_consent(wrapper, tmp_path):
+    manifest = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())
+    args = manifest["runtime"]["args"]
+    assert "--trust-model-code" not in args
+    assert (
+        wrapper._build_parser()
+        .parse_args([str(tmp_path / "input.nii.gz")])
+        .trust_model_code
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "args,error",
+    [
+        (["--fail-on-not-ready"], "requires --check-setup"),
+        (["--max-new-tokens", "0"], "must be >= 1"),
+        (["--model", ""], "must not be empty"),
+        (["--revision", ""], "must not be empty"),
+        ([], "volume_or_fixture is required"),
+    ],
+)
+def test_argument_errors(wrapper, capsys, args, error):
+    assert wrapper.main(args) == 2
+    assert error in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("distribution,module", [("os", "os"), ("torch", "os")])
-def test_setup_imports_reject_undocumented_modules(
-    wrapper, monkeypatch, distribution, module
-):
-    def unexpected_call(*_):
-        pytest.fail("undocumented dependency reached the package probe")
-
-    monkeypatch.setattr(wrapper, "_installed_version", unexpected_call)
-    monkeypatch.setattr(wrapper.importlib, "import_module", unexpected_call)
+def test_setup_imports_reject_undocumented_modules(wrapper, distribution, module):
     with pytest.raises(wrapper.SkillError, match="documented dependencies"):
         wrapper._package_status(distribution, module)
 
@@ -232,240 +525,163 @@ def test_setup_imports_allow_documented_dependency(wrapper, monkeypatch):
     imported = []
     monkeypatch.setattr(wrapper, "_installed_version", lambda _: "25.0")
     monkeypatch.setattr(wrapper.importlib, "import_module", imported.append)
-    assert wrapper._package_status("packaging", "packaging") == {
-        "installed": True,
-        "importable": True,
-        "version": "25.0",
-    }
-    assert imported == ["packaging"]
+    assert wrapper._package_status("numpy", "numpy")["importable"] is True
+    assert imported == ["numpy"]
 
 
-def test_direct_nifti_mock_path(tmp_path: Path, ct_input: Path) -> None:
-    volume = ct_input
-    proc = _run(
-        volume,
-        "--mock",
-        "--anatomy-region",
-        "abdomen",
-        "--prompt",
-        "Summarize the model response for engineering review.",
-        "--no-thinking",
-        "--out-dir",
-        tmp_path / "out",
-    )
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["input"]["volume"]["source"] == "file"
-    image = nib.load(volume)
-    assert payload["input"]["volume"]["shape"] == list(image.shape)
-    assert payload["input"]["volume"]["spacing_mm"] == pytest.approx(
-        image.header.get_zooms(), abs=1e-6
-    )
-    assert (
-        payload["input"]["volume"]["sha256"]
-        == hashlib.sha256(volume.read_bytes()).hexdigest()
-    )
-    schema = json.loads((SKILL_DIR / "validators/output_schema.json").read_text())
-    jsonschema.validate(payload, schema)
-    assert payload["input"]["anatomy_region"] == "abdomen"
-    assert payload["input"]["enable_thinking"] is False
-    assert payload["input"]["prompt"].startswith("Summarize")
-
-
-def test_cli_overrides_fixture_region_and_thinking(
-    tmp_path: Path, ct_input: Path
-) -> None:
-    fixture = tmp_path / "request.json"
-    fixture.write_text(
-        json.dumps(
-            {
-                "volume_path": str(ct_input),
-                "anatomy_region": "chest",
-                "enable_thinking": True,
-            }
-        )
-    )
-    proc = _run(
-        fixture,
-        "--mock",
-        "--anatomy-region",
-        "none",
-        "--no-thinking",
-        "--out-dir",
-        tmp_path / "out",
-    )
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["input"]["anatomy_region"] == "none"
-    assert payload["input"]["enable_thinking"] is False
-
-
-def test_rejects_non_nifti_file(tmp_path: Path) -> None:
-    bad = tmp_path / "not_a_volume.txt"
-    bad.write_text("not a volume")
-    proc = _run(bad, "--mock", "--out-dir", tmp_path / "out")
-    assert proc.returncode == 2
-    assert "expected .nii or .nii.gz" in proc.stderr
-
-
-def test_rejects_git_lfs_pointer_before_loading_model(tmp_path: Path) -> None:
-    volume = tmp_path / "example_1.nii.gz"
-    volume.write_text(
-        "version https://git-lfs.github.com/spec/v1\n"
-        f"oid sha256:{'a' * 64}\nsize 1000\n"
-    )
-    proc = _run(volume, "--out-dir", tmp_path / "out")
-    assert proc.returncode == 2
-    assert "Git LFS pointer" in proc.stderr
-    assert "git lfs pull" in proc.stderr
-    assert not proc.stdout
-
-
-def test_unreadable_volume_fails_cleanly(wrapper, tmp_path, monkeypatch):
-    volume = tmp_path / "ct.nii.gz"
-    volume.touch()
-    original_open = Path.open
-
-    def open_file(path, *args, **kwargs):
-        if path == volume:
-            raise PermissionError("test input is unreadable")
-        return original_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", open_file)
-    with pytest.raises(wrapper.SkillError, match="could not read NIfTI volume"):
-        wrapper._volume_info(volume)
-
-
-def test_rejects_4d_nifti(tmp_path: Path, nifti_factory) -> None:
-    volume = nifti_factory("four_dimensional.nii.gz", shape=(4, 5, 6, 2))
-    proc = _run(volume, "--mock", "--out-dir", tmp_path / "out")
-    assert proc.returncode == 2
-    assert "requires one 3D NIfTI volume" in proc.stderr
-
-
-def test_missing_input_fails_cleanly(tmp_path: Path) -> None:
-    proc = _run(tmp_path / "missing.nii.gz", "--mock", "--out-dir", tmp_path / "out")
-    assert proc.returncode == 2
-    assert "input not found" in proc.stderr
-
-
-def test_empty_cache_reports_download_guidance(ready_setup, monkeypatch, tmp_path):
-    cache_manager = pytest.importorskip("huggingface_hub.utils._cache_manager")
-    monkeypatch.setattr(cache_manager, "HF_HUB_CACHE", str(tmp_path / "absent-cache"))
-    setup = ready_setup._setup_report("nvidia/NV-Reason-CT", "main")["setup"]
-    assert (
-        setup["recommendation"] == "download_model_assets_or_disable_local_files_only"
-    )
-    cache = setup["model_cache"]
-    assert cache["inspectable"] is False
-    assert cache["has_safetensors"] is False
-    assert cache["complete"] is False
-    assert "config.json" in cache["missing_files"]
-    assert not (tmp_path / "absent-cache").exists()
-
-
-def test_uncached_revision_is_not_ready(ready_setup, monkeypatch, tmp_path):
-    snapshot = _cache_snapshot(
-        tmp_path,
-        TEST_COMMIT,
-        ["main"],
-        (*ready_setup.REQUIRED_MODEL_FILES, "model.safetensors"),
-    )
-    _stub_cache(monkeypatch, snapshot)
-    setup = ready_setup._setup_report("nvidia/NV-Reason-CT", "missing-revision")[
-        "setup"
-    ]
-    assert setup["recommendation"] != "ready_for_live_cuda_inference"
-    assert setup["model_cache"]["cached"] is False
-    assert setup["model_cache"]["resolved_revision"] is None
-
-
-@pytest.mark.parametrize("revision", ["main", TEST_COMMIT])
-def test_complete_selected_revision_is_ready(
+@pytest.mark.parametrize("revision", ["main", TEST_COMMIT, "missing"])
+def test_setup_uses_selected_snapshot_only(
     ready_setup, monkeypatch, tmp_path, revision
 ):
-    snapshot = _cache_snapshot(
-        tmp_path,
-        TEST_COMMIT,
-        ["main"],
-        (*ready_setup.REQUIRED_MODEL_FILES, "model.safetensors"),
+    snapshot = _snapshot(tmp_path, ready_setup)
+    _stub_snapshot(monkeypatch, snapshot)
+    setup = ready_setup._setup_report(ready_setup.DEFAULT_MODEL, revision)["setup"]
+    assert setup["model_cache"]["complete"] is (revision != "missing")
+    assert (setup["recommendation"] == "ready_for_live_cuda_inference") is (
+        revision != "missing"
     )
-    _stub_cache(monkeypatch, snapshot)
-    setup = ready_setup._setup_report("nvidia/NV-Reason-CT", revision)["setup"]
-    assert setup["recommendation"] == "ready_for_live_cuda_inference"
-    assert setup["model_cache"]["resolved_revision"] == TEST_COMMIT
-    assert setup["model_cache"]["missing_files"] == []
+
+
+def test_empty_cache_is_not_ready(ready_setup, monkeypatch):
+    _stub_snapshot(monkeypatch, None)
+    cache = ready_setup._setup_report(ready_setup.DEFAULT_MODEL, "main")["setup"][
+        "model_cache"
+    ]
+    assert cache["complete"] is False and cache["cached"] is False
+    assert "config.json" in cache["missing_files"]
 
 
 @pytest.mark.parametrize(
-    "missing_file",
+    "missing",
     [
         "config.json",
         "processor.py",
         "tokenizer.json",
         "chat_template.jinja",
         "image_processor_3d/preprocessor_config.json",
+        "model.safetensors",
     ],
 )
-def test_assets_from_another_revision_do_not_complete_cache(
-    ready_setup, monkeypatch, tmp_path, missing_file
+def test_other_snapshot_cannot_complete_selected_assets(
+    ready_setup, monkeypatch, tmp_path, missing
 ):
-    selected = _cache_snapshot(
-        tmp_path,
-        TEST_COMMIT,
-        ["main"],
-        (set(ready_setup.REQUIRED_MODEL_FILES) | {"model.safetensors"})
-        - {missing_file},
-    )
-    other = _cache_snapshot(tmp_path, "b" * 40, ["other"], [missing_file])
-    _stub_cache(monkeypatch, selected, other)
-    setup = ready_setup._setup_report("nvidia/NV-Reason-CT", "main")["setup"]
-    assert setup["recommendation"] != "ready_for_live_cuda_inference"
-    assert setup["model_cache"]["missing_files"] == [missing_file]
-    assert setup["model_cache"]["has_safetensors"] is True
+    selected = _snapshot(tmp_path, ready_setup, missing=[missing])
+    _snapshot(tmp_path / "other-cache", ready_setup)
+    _stub_snapshot(monkeypatch, selected)
+    cache = ready_setup._model_cache_report(ready_setup.DEFAULT_MODEL, "main")
+    assert cache["complete"] is False and cache["missing_files"] == [missing]
 
 
 @pytest.mark.parametrize("complete", [False, True])
 def test_every_indexed_weight_shard_is_required(
     ready_setup, monkeypatch, tmp_path, complete
 ):
-    index_name = "model.safetensors.index.json"
-    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
-    selected = _cache_snapshot(
-        tmp_path,
-        TEST_COMMIT,
-        ["main"],
-        [
-            *ready_setup.REQUIRED_MODEL_FILES,
-            index_name,
-            *(shards if complete else shards[:1]),
-        ],
-    )
-    (selected.snapshot_path / index_name).write_text(
+    snapshot = _snapshot(tmp_path, ready_setup, shards=True)
+    shards = ["model-00001.safetensors", "model-00002.safetensors"]
+    (snapshot / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": {"layer1": shards[0], "layer2": shards[1]}})
     )
-    _stub_cache(monkeypatch, selected)
-    cache = ready_setup._model_cache_report("nvidia/NV-Reason-CT", "main")
+    for name in shards if complete else shards[:1]:
+        (snapshot / name).write_bytes(b"unit-test weights placeholder")
+    _stub_snapshot(monkeypatch, snapshot)
+    cache = ready_setup._model_cache_report(ready_setup.DEFAULT_MODEL, "main")
     assert cache["complete"] is complete
-    assert cache["has_safetensors"] is complete
     assert cache["missing_files"] == ([] if complete else shards[1:])
 
 
-@pytest.mark.parametrize("index_text", ["not json", "[]", '{"weight_map": {}}'])
-def test_invalid_weight_index_is_not_ready(
-    ready_setup, monkeypatch, tmp_path, index_text
+@pytest.mark.parametrize(
+    "index", ["not json", "[]", '{"weight_map": {}}', '{"weight_map": {"x": 2}}']
+)
+def test_invalid_weight_index_is_not_ready(ready_setup, monkeypatch, tmp_path, index):
+    snapshot = _snapshot(tmp_path, ready_setup, shards=True)
+    (snapshot / "model.safetensors.index.json").write_text(index)
+    _stub_snapshot(monkeypatch, snapshot)
+    cache = ready_setup._model_cache_report(ready_setup.DEFAULT_MODEL, "main")
+    assert cache["complete"] is False and "could not inspect" in cache["error"]
+
+
+@pytest.mark.parametrize(
+    "package,installed,importable",
+    [
+        ("torch", True, False),
+        ("nibabel", False, False),
+        ("huggingface-hub", False, False),
+        ("monai", True, False),
+    ],
+)
+def test_missing_or_broken_dependency_blocks_setup(
+    ready_setup, monkeypatch, tmp_path, package, installed, importable
 ):
-    index_name = "model.safetensors.index.json"
-    selected = _cache_snapshot(
-        tmp_path, TEST_COMMIT, ["main"], [*ready_setup.REQUIRED_MODEL_FILES, index_name]
+    original = ready_setup._package_status
+    monkeypatch.setattr(
+        ready_setup,
+        "_package_status",
+        lambda name, module: (
+            {
+                "installed": installed,
+                "importable": importable,
+                "version": "test-build" if installed else None,
+            }
+            if name == package
+            else original(name, module)
+        ),
     )
-    (selected.snapshot_path / index_name).write_text(index_text)
-    _stub_cache(monkeypatch, selected)
-    setup = ready_setup._setup_report("nvidia/NV-Reason-CT", "main")["setup"]
-    assert setup["recommendation"] != "ready_for_live_cuda_inference"
-    assert "could not inspect cached weights" in setup["model_cache"]["error"]
+    _stub_snapshot(monkeypatch, _snapshot(tmp_path, ready_setup))
+    setup = ready_setup._setup_report(ready_setup.DEFAULT_MODEL, "main")["setup"]
+    assert setup["recommendation"] == "install_or_repair_upstream_dependencies"
+    assert setup["dependencies"][package]["importable"] is False
+    assert setup["dependency_setup_url"] == ready_setup.UPSTREAM_SETUP_URL
 
 
+@pytest.mark.parametrize("version", ["1.0", "99.0", "99.0+test"])
+def test_versions_are_reported_without_enforcing_a_skill_constraint(
+    ready_setup, monkeypatch, tmp_path, version
+):
+    monkeypatch.setattr(ready_setup, "_installed_version", lambda _: version)
+    _stub_snapshot(monkeypatch, _snapshot(tmp_path, ready_setup))
+    setup = ready_setup._setup_report(ready_setup.DEFAULT_MODEL, "main")["setup"]
+    assert setup["recommendation"] == "ready_for_live_cuda_inference"
+    assert setup["version_constraints_checked"] is False
+    assert setup["model_code_opt_in_required"] is True
+    assert {value["version"] for value in setup["dependencies"].values()} == {version}
+    assert set(ready_setup._environment_packages().values()) == {version}
+
+
+def test_missing_inference_api_points_to_upstream_setup(wrapper, monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace())
+    with pytest.raises(
+        wrapper.SkillError, match="upstream inference dependencies"
+    ) as error:
+        wrapper._run_transformers_inference(
+            volume_path=tmp_path / "ct.nii.gz",
+            prompt="test prompt",
+            anatomy_region="chest",
+            enable_thinking=True,
+            model_id=wrapper.DEFAULT_MODEL,
+            revision=TEST_COMMIT,
+            max_new_tokens=3,
+            local_files_only=True,
+            trust_model_code=True,
+        )
+    assert wrapper.UPSTREAM_SETUP_URL in str(error.value)
+
+
+def test_dependency_import_failure_is_reported(wrapper, monkeypatch):
+    monkeypatch.setattr(wrapper, "_installed_version", lambda _: "test-build")
+
+    def broken_import(_):
+        raise ImportError("test binary dependency failure")
+
+    monkeypatch.setattr(wrapper.importlib, "import_module", broken_import)
+    status = wrapper._package_status("torch", "torch")
+    assert status["installed"] is True and status["importable"] is False
+    assert status["version"] == "test-build"
+    assert "test binary dependency failure" in status["error"]
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("region", ["chest", "none"])
 @pytest.mark.parametrize(
     "new_tokens,eos_ids,truncated",
     [
@@ -477,16 +693,24 @@ def test_invalid_weight_index_is_not_ready(
         ([7, 8, 9], None, True),
     ],
 )
-def test_live_route_pins_both_loaders_and_detects_truncation(
-    wrapper, monkeypatch, tmp_path, new_tokens, eos_ids, truncated
+def test_inference_loaders_and_generation_contract(
+    wrapper,
+    monkeypatch,
+    tmp_path,
+    capsys,
+    local,
+    region,
+    new_tokens,
+    eos_ids,
+    truncated,
 ):
     calls = {}
-    monkeypatch.setattr(wrapper, "_require_live_versions", lambda: None)
-    monkeypatch.setattr(wrapper, "_select_cuda_device", lambda _: "cuda")
+    monkeypatch.setattr(wrapper, "_select_cuda_device", lambda: "cuda")
     monkeypatch.setenv("HF_TOKEN", "unit-test-token")
 
     def download(model_id, filename, **kwargs):
-        calls.setdefault("downloads", []).append((model_id, filename, kwargs))
+        assert not local, "local checkpoint must never reach Hub download"
+        calls["download"] = (model_id, filename, kwargs)
         return str(tmp_path / "snapshots" / TEST_COMMIT / filename)
 
     class Inputs(dict):
@@ -524,9 +748,18 @@ def test_live_route_pins_both_loaders_and_detects_truncation(
 
         def batch_decode(self, tokens, **kwargs):
             assert tokens.tolist() == [new_tokens]
-            return ["partial or complete model text"]
+            assert kwargs == {
+                "skip_special_tokens": True,
+                "clean_up_tokenization_spaces": False,
+            }
+            return ["test-double response"]
 
     def load_model(model_id, **kwargs):
+        warning = capsys.readouterr()
+        assert not warning.out
+        assert "warning:" in warning.err and "--trust-model-code" in warning.err
+        assert "not sandboxed" in warning.err and repr(model_id) in warning.err
+        assert ("local export" if local else TEST_COMMIT) in warning.err
         calls["model"] = (model_id, kwargs)
         return Model()
 
@@ -541,9 +774,7 @@ def test_live_route_pins_both_loaders_and_detects_truncation(
         sys.modules,
         "torch",
         SimpleNamespace(
-            bfloat16="bfloat16",
-            __version__="test",
-            inference_mode=nullcontext,
+            bfloat16="bfloat16", __version__="test", inference_mode=nullcontext
         ),
     )
     monkeypatch.setitem(
@@ -555,45 +786,55 @@ def test_live_route_pins_both_loaders_and_detects_truncation(
             AutoProcessor=SimpleNamespace(from_pretrained=load_processor),
         ),
     )
+    model_id = str(tmp_path / "local-export") if local else wrapper.DEFAULT_MODEL
     text, runtime = wrapper._run_transformers_inference(
         volume_path=tmp_path / "ct.nii",
         prompt="engineering prompt",
-        anatomy_region="chest",
+        anatomy_region=region,
         enable_thinking=True,
-        model_id="nvidia/NV-Reason-CT",
-        revision="main",
-        device_request="auto",
+        model_id=model_id,
+        revision=None if local else "main",
         max_new_tokens=3,
         local_files_only=True,
+        trust_model_code=True,
     )
-    assert text
-    assert calls["downloads"] == [
-        (
-            "nvidia/NV-Reason-CT",
+    assert text == "test-double response"
+    if not local:
+        assert calls["download"] == (
+            model_id,
             "config.json",
-            {
-                "revision": "main",
-                "local_files_only": True,
-                "token": "unit-test-token",
-            },
+            {"revision": "main", "local_files_only": True, "token": "unit-test-token"},
         )
-    ]
     for name in ("model", "processor"):
-        model_id, kwargs = calls[name]
-        assert model_id == "nvidia/NV-Reason-CT"
-        assert kwargs["revision"] == kwargs["code_revision"] == TEST_COMMIT
-        assert kwargs["local_files_only"] is True
-        assert kwargs["trust_remote_code"] is True
-        assert kwargs["token"] == "unit-test-token"
+        identifier, kwargs = calls[name]
+        assert identifier == model_id
+        assert (
+            kwargs["local_files_only"] is True and kwargs["trust_remote_code"] is True
+        )
+        if local:
+            assert kwargs["revision"] is None and kwargs["code_revision"] is None
+            assert "token" not in kwargs
+        else:
+            assert kwargs["revision"] == kwargs["code_revision"] == TEST_COMMIT
+            assert kwargs["token"] == "unit-test-token"
     assert calls["model"][1]["dtype"] == "bfloat16"
     assert calls["model"][1]["attn_implementation"] == "sdpa"
     assert calls["preprocess"]["images3d"] == [str(tmp_path / "ct.nii")]
-    assert calls["preprocess"]["anatomy_region"] == "chest"
+    assert calls["preprocess"]["anatomy_region"] == (
+        None if region == "none" else region
+    )
     assert calls["template"][0][0]["content"][1]["text"] == "engineering prompt"
-    assert calls["template"][1]["enable_thinking"] is True
-    assert calls["generate"]["do_sample"] is False
+    assert calls["template"][1] == {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": True,
+    }
+    assert (
+        calls["generate"]["do_sample"] is False
+        and calls["generate"]["use_cache"] is True
+    )
     assert calls["generate"]["max_new_tokens"] == 3
-    assert runtime["resolved_revision"] == TEST_COMMIT
+    assert runtime["resolved_revision"] == (None if local else TEST_COMMIT)
     assert runtime["truncated_by_max_new_tokens"] is truncated
 
 
@@ -606,245 +847,62 @@ def test_unresolvable_revision_fails_cleanly(wrapper, monkeypatch):
     )
     with pytest.raises(wrapper.SkillError, match="could not resolve model revision"):
         wrapper._resolve_model_revision(
-            "nvidia/NV-Reason-CT", "missing", local_files_only=True, token=None
+            wrapper.DEFAULT_MODEL, "missing", local_files_only=True, token=None
         )
 
 
-@pytest.mark.parametrize("truncated", [False, True])
-def test_live_cli_preserves_json_and_returns_completion_status(
-    wrapper, monkeypatch, tmp_path, capsys, truncated, ct_input
+@pytest.mark.parametrize("alias", ["--model", "--model-id"])
+def test_local_export_cli_identity(
+    wrapper, volume_double, inference_double, tmp_path, monkeypatch, capsys, alias
 ):
-    volume = ct_input
-    monkeypatch.delenv("MOCK_NV_REASON_CT", raising=False)
-    monkeypatch.setattr(
-        wrapper,
-        "_run_transformers_inference",
-        lambda **_: (
-            "x",
-            {
-                "resolved_revision": TEST_COMMIT,
-                "device": "cuda",
-                "torch_dtype": "bfloat16",
-                "transformers_version": "test",
-                "torch_version": "test",
-                "generated_tokens": 1,
-                "truncated_by_max_new_tokens": truncated,
-            },
-        ),
-    )
-    code = wrapper.main(
-        [str(volume), "--out-dir", str(tmp_path / "out"), "--max-new-tokens", "1"]
-    )
-    captured = capsys.readouterr()
-    payload = json.loads(captured.out)
-    assert code == (3 if truncated else 0)
-    assert payload["output"]["response_text"] == "x"
-    assert payload["runtime"]["revision"] == "main"
-    assert payload["runtime"]["resolved_revision"] == TEST_COMMIT
-    assert payload["runtime"]["truncated_by_max_new_tokens"] is truncated
-    assert ("partial output" in captured.err) is truncated
-    if truncated:
-        partial_path = Path(payload["output"]["partial_json_path"])
-        assert partial_path.parent == tmp_path / "out"
-        assert json.loads(partial_path.read_text()) == payload
-        assert str(partial_path) in captured.err
-    else:
-        assert "partial_json_path" not in payload["output"]
-        assert not list((tmp_path / "out").glob("partial_result_*.json"))
-    schema = json.loads((SKILL_DIR / "validators/output_schema.json").read_text())
-    jsonschema.validate(payload, schema)
-    checks = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())[
-        "validation"
-    ]["sanity_checks"]
-    completion_gate = next(
-        c for c in checks if c["path"] == "runtime.truncated_by_max_new_tokens"
-    )
-    assert completion_gate["eq"] is False
+    export = tmp_path / "local export"
+    export.mkdir()
+    monkeypatch.setenv("NV_REASON_CT_REVISION", "ignored-for-local-export")
     assert (
-        payload["runtime"]["truncated_by_max_new_tokens"] == completion_gate["eq"]
-    ) is not truncated
-    for invalid_revision in (None, "main"):
-        payload["runtime"]["resolved_revision"] = invalid_revision
-        with pytest.raises(jsonschema.ValidationError):
-            jsonschema.validate(payload, schema)
-
-
-def test_partial_results_do_not_overwrite_previous_attempts(wrapper, tmp_path):
-    payload = {"output": {"response_text": "first attempt"}}
-    wrapper._preserve_partial_result(payload, tmp_path)
-    first_path = Path(payload["output"]["partial_json_path"])
-    first_bytes = first_path.read_bytes()
-    payload["output"]["response_text"] = "second attempt"
-    wrapper._preserve_partial_result(payload, tmp_path)
-    assert Path(payload["output"]["partial_json_path"]) != first_path
-    assert first_path.read_bytes() == first_bytes
-
-
-def test_partial_save_failure_still_allows_stdout_payload(
-    wrapper, monkeypatch, tmp_path, capsys
-):
-    def fail_save(**kwargs):
-        raise PermissionError("test output directory is not writable")
-
-    monkeypatch.setattr(wrapper.tempfile, "NamedTemporaryFile", fail_save)
-    payload = {"output": {"response_text": "partial text"}}
-    wrapper._preserve_partial_result(payload, tmp_path)
-    assert payload == {"output": {"response_text": "partial text"}}
-    assert "retain stdout" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "printf unexpected\n" + EXPECTED_INSTALL_COMMAND,
-        EXPECTED_INSTALL_COMMAND + "\nprintf unexpected",
-        EXPECTED_INSTALL_COMMAND.replace("hf download", "/usr/bin/hf download"),
-        EXPECTED_INSTALL_COMMAND.replace(" &&", ";", 1),
-    ],
-)
-def test_install_command_rejects_unreviewed_shell_operations(command):
-    with pytest.raises(ValueError, match="review its shell operations"):
-        _validated_install_command(command)
-
-
-@pytest.mark.parametrize("download_fails", [False, True])
-def test_documented_install_downloads_before_pip_without_exposing_token(
-    tmp_path, download_fails, monkeypatch
-):
-    monkeypatch.setenv("INSTALL_TEST_UNRELATED_SECRET", "unit-test-only")
-    command = yaml.safe_load((SKILL_DIR / "skill_manifest.yaml").read_text())[
-        "runtime"
-    ]["external_assets"][0]["install_command"]
-    assert command.strip() in (SKILL_DIR / "SKILL.md").read_text()
-    command = _validated_install_command(command)
-    # Execute the actual documented shell flow with fake installers: no network,
-    # package installation, or changes to the caller's environment are permitted.
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    for name in ("python", "hf"):
-        executable = fake_bin / name
-        executable.write_text(f"#!{sys.executable}\n" + """
-import json, os, sys
-from pathlib import Path
-assert "INSTALL_TEST_UNRELATED_SECRET" not in os.environ
-args = sys.argv[1:]
-name = Path(sys.argv[0]).name
-with Path(os.environ["INSTALL_TEST_LOG"]).open("a") as stream:
-    stream.write(json.dumps([name, args]) + "\\n")
-if name == "hf":
-    assert os.environ["HF_TOKEN"] == "unit-test-token"
-    if os.environ["INSTALL_TEST_FAIL"] == "1":
-        sys.exit(17)
-    Path(args[args.index("--local-dir") + 1], "requirements.txt").write_text("# test\\n")
-elif "-r" in args:
-    assert Path(args[args.index("-r") + 1]).is_file()
-""")
-        executable.chmod(0o700)
-    log_path = tmp_path / "commands.jsonl"
-    proc = subprocess.run(
-        ["bash", "-c", command],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env={
-            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-            "TMPDIR": str(tmp_path),
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "HF_TOKEN": "unit-test-token",
-            "NV_REASON_CT_REVISION": "reviewed-revision",
-            "INSTALL_TEST_LOG": str(log_path),
-            "INSTALL_TEST_FAIL": "1" if download_fails else "0",
-        },
+        wrapper.main([str(volume_double[0]), alias, str(export), "--trust-model-code"])
+        == 0
     )
-    assert proc.returncode == (17 if download_fails else 0), proc.stderr
-    calls = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert len(calls) == (2 if download_fails else 3)
-    assert calls[0] == ["python", ["-m", "pip", "install", "huggingface_hub>=1.5,<2"]]
-    assert calls[1][0] == "hf"
-    assert calls[1][1][:5] == [
-        "download",
-        "nvidia/NV-Reason-CT",
-        "requirements.txt",
-        "--revision",
-        "reviewed-revision",
-    ]
-    assert "unit-test-token" not in log_path.read_text() + proc.stdout + proc.stderr
-    if not download_fails:
-        assert calls[2] == [
-            "python",
-            [
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(Path(calls[1][1][-1]) / "requirements.txt"),
-                "torch>=2.9.0",
-            ],
-        ]
+    payload = json.loads(capsys.readouterr().out)
+    _validate(payload)
+    runtime = payload["runtime"]
+    assert (
+        runtime["model"] == str(export.resolve()) and runtime["model_source"] == "local"
+    )
+    assert runtime["revision"] is None and runtime["resolved_revision"] is None
+    assert (
+        runtime["local_files_only"] is True
+        and inference_double[0][0]["revision"] is None
+    )
+    runtime["resolved_revision"] = TEST_COMMIT
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(payload)
 
 
-@pytest.mark.parametrize(
-    "package,version",
-    [
-        ("torch", "2.8.0+cu128"),
-        ("monai", "1.5.0"),
-        ("nibabel", "5.3.2"),
-        ("torch", "not-a-version"),
-    ],
-)
-def test_setup_reports_upstream_minimum_version_mismatch(
-    ready_setup, monkeypatch, package, version
-):
-    original = ready_setup._package_status
-
-    def package_status(name, import_name):
-        status = original(name, import_name)
-        if name == package:
-            status["version"] = version
-        return status
-
-    monkeypatch.setattr(ready_setup, "_package_status", package_status)
-    _stub_cache(monkeypatch)
-    setup = ready_setup._setup_report(ready_setup.DEFAULT_MODEL, "main")["setup"]
-    assert setup["recommendation"] == "use_the_upstream_minimum_dependency_versions"
-    assert setup["minimum_version_mismatches"][package]["installed"] == version
+def test_local_export_setup_never_calls_hub(ready_setup, tmp_path, monkeypatch):
+    export = _snapshot(tmp_path, ready_setup)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace())
+    model, revision = ready_setup._model_location(str(export), None)
+    setup = ready_setup._setup_report(model, revision)["setup"]
+    assert setup["model_source"] == "local" and setup["revision"] is None
+    assert setup["model_cache"]["complete"] is True
+    assert setup["recommendation"] == "ready_for_live_cuda_inference"
 
 
-@pytest.mark.parametrize("torch_version", ["2.9.0", "2.9.0+cu128", "2.12.0+cu130"])
-def test_live_version_check_accepts_supported_torch_builds(
-    wrapper, monkeypatch, torch_version
-):
-    versions = {
-        **wrapper.EXACT_UPSTREAM_VERSIONS,
-        **wrapper.MINIMUM_UPSTREAM_VERSIONS,
-        "torch": torch_version,
-    }
-    monkeypatch.setattr(wrapper, "_installed_version", versions.get)
-    wrapper._require_live_versions()
+def test_incomplete_local_export_setup_is_not_ready(ready_setup, tmp_path):
+    setup = ready_setup._setup_report(str(tmp_path), None)["setup"]
+    assert setup["model_cache"]["complete"] is False
+    assert setup["recommendation"] == "stage_complete_model_and_processor_assets"
 
 
-@pytest.mark.parametrize("package", ["torch", "monai", "nibabel"])
-def test_live_version_check_rejects_missing_or_old_minimum(
-    wrapper, monkeypatch, package
-):
-    versions = {**wrapper.EXACT_UPSTREAM_VERSIONS, **wrapper.MINIMUM_UPSTREAM_VERSIONS}
-    versions[package] = "1.0.0"
-    monkeypatch.setattr(wrapper, "_installed_version", versions.get)
-    with pytest.raises(wrapper.SkillError, match=package):
-        wrapper._require_live_versions()
+def test_local_model_rejects_explicit_hub_revision(wrapper, tmp_path):
+    with pytest.raises(wrapper.SkillError, match="only to Hub models"):
+        wrapper._model_location(str(tmp_path), "main")
 
 
-@pytest.mark.parametrize(
-    "region,prompt",
-    [
-        ("chest", "write a structured chest CT report"),
-        ("abdomen", "write a structured abdominal CT report"),
-    ],
-)
-def test_default_prompt_matches_upstream_cli(
-    wrapper, tmp_path, ct_input, region, prompt
-):
-    spec = wrapper._load_input(ct_input, None, region, None)
-    assert spec.prompt == prompt
-    assert spec.enable_thinking is True
+def test_local_model_path_errors(wrapper, tmp_path):
+    with pytest.raises(wrapper.SkillError, match="directory not found"):
+        wrapper._model_location(str(tmp_path / "missing"), None)
+    file = tmp_path / "file"
+    file.touch()
+    with pytest.raises(wrapper.SkillError, match="not a directory"):
+        wrapper._model_location(str(file), None)

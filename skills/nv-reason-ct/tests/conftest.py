@@ -1,8 +1,12 @@
 """Opt-in upstream example and live checks; never download or install assets."""
 
 from pathlib import Path
+import importlib.util
 import re
+import sys
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -18,63 +22,71 @@ def pytest_addoption(parser):
         help="Run offline CUDA inference and compare with the upstream CLI.",
     )
     group.addoption(
+        "--nv-reason-ct-trust-model-code",
+        action="store_true",
+        help="Authorize unsandboxed custom model code in both live inference paths.",
+    )
+    group.addoption(
         "--nv-reason-ct-revision",
         help="Reviewed, already cached immutable Hugging Face commit for live tests.",
     )
 
 
-def pytest_generate_tests(metafunc):
-    if "ct_input" in metafunc.fixturenames:
-        cases = (
-            ["example_1", "example_2", "example_3"]
-            if metafunc.config.getoption("--nv-reason-ct-upstream")
-            else ["synthetic"]
-        )
-        metafunc.parametrize("ct_input", cases, indirect=True)
+@pytest.fixture
+def wrapper(monkeypatch):
+    monkeypatch.delenv("NV_REASON_CT_MODEL", raising=False)
+    monkeypatch.delenv("NV_REASON_CT_REVISION", raising=False)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_nv_reason_ct.py"
+    spec = importlib.util.spec_from_file_location("nv_reason_ct_test_wrapper", script)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def volume_double(wrapper, tmp_path, monkeypatch):
+    """Opaque bytes plus a NiBabel loader double, NOT a generated NIfTI scan."""
+    volume = tmp_path / "ct.nii.gz"
+    volume.write_bytes(b"unit-test input identity; not NIfTI data")
+    image = SimpleNamespace(
+        shape=(4, 5, 6),
+        header=SimpleNamespace(get_zooms=lambda: (1.0, 1.5, 2.0)),
+        affine=np.eye(4),
+        get_data_dtype=lambda: np.dtype("int16"),
+    )
+
+    def load(path):
+        assert Path(path) == volume
+        return image
+
+    monkeypatch.setattr(
+        wrapper, "_nifti_modules", lambda: (SimpleNamespace(load=load), np)
+    )
+    return volume, image
 
 
 @pytest.fixture(scope="session")
 def upstream_checkout(pytestconfig):
     value = pytestconfig.getoption("--nv-reason-ct-upstream")
     if not value:
-        pytest.fail("Provide --nv-reason-ct-upstream with an authorized checkout")
+        if pytestconfig.getoption("--nv-reason-ct-live"):
+            pytest.fail("Provide --nv-reason-ct-upstream with an authorized checkout")
+        pytest.skip("Real-volume checks require --nv-reason-ct-upstream")
     checkout = Path(value).expanduser().resolve()
     if not (checkout / "inference.py").is_file():
         pytest.fail(f"Missing upstream inference.py in {checkout}")
     return checkout
 
 
-@pytest.fixture
-def nifti_factory(request):
-    """Accept a test-infrastructure provider without importing repository tools."""
-    try:
-        return request.getfixturevalue("synthetic_nifti_factory")
-    except pytest.FixtureLookupError as exc:
-        if exc.argname != "synthetic_nifti_factory":
-            raise
-        pytest.skip(
-            "Synthetic fixture provider not loaded; run the repository test "
-            "target or supply the optional pytest provider. Upstream example "
-            "tests do not require it."
-        )
-
-
-@pytest.fixture
-def ct_input(request, tmp_path):
-    """Use real examples for success paths when the caller supplies the data."""
-    if request.param == "synthetic":
-        return request.getfixturevalue("nifti_factory")("ct.nii.gz")
-    checkout = request.getfixturevalue("upstream_checkout")
-    volume = checkout / "examples" / f"{request.param}.nii.gz"
-    if not volume.is_file():
-        pytest.fail(f"Missing example volume: {volume}; run git lfs pull")
-    return volume
-
-
 @pytest.fixture(scope="session")
 def live_revision(pytestconfig):
     if not pytestconfig.getoption("--nv-reason-ct-live"):
         pytest.skip("Live model inference requires --nv-reason-ct-live")
+    if not pytestconfig.getoption("--nv-reason-ct-trust-model-code"):
+        pytest.fail(
+            "Live tests require explicit --nv-reason-ct-trust-model-code consent"
+        )
     revision = pytestconfig.getoption("--nv-reason-ct-revision") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         pytest.fail("Live tests require a reviewed immutable --nv-reason-ct-revision")

@@ -1,5 +1,5 @@
 id: medagent.nv_reason_ct
-version: 0.2.0
+version: 0.3.1
 license: OpenMDW-1.1
 upstream_refs:
   - kind: huggingface_repo
@@ -70,22 +70,21 @@ runtime:
     - "${fixture}"
     - "--out-dir"
     - "${out}/artifacts"
+  # Inventory only. Upstream owns installation requirements and compatibility.
   dependencies:
-    transformers: "==5.6.2"
-    torch: ">=2.9.0"
-    monai: ">=1.5.1"
-    nibabel: ">=5.3.3"
-    dynamic-network-architectures: "==0.4.3"
+    transformers: "*"
+    torch: "*"
+    monai: "*"
+    nibabel: "*"
+    dynamic-network-architectures: "*"
     scipy: "*"
     numpy: "*"
     Pillow: "*"
     timm: "*"
     einops: "*"
     safetensors: "*"
-    huggingface_hub: ">=1.5,<2"
-    packaging: ">=20.9"
+    huggingface_hub: "*"
   env_optional:
-    - MOCK_NV_REASON_CT
     - NV_REASON_CT_MODEL
     - NV_REASON_CT_REVISION
     - HF_HOME
@@ -100,42 +99,21 @@ runtime:
   external_assets:
     - kind: huggingface_repo
       repo_id: nvidia/NV-Reason-CT
-      install_command: |
-        python -m pip install "huggingface_hub>=1.5,<2" &&
-        nv_reason_ct_prereqs="$(mktemp -d)" &&
-        hf download nvidia/NV-Reason-CT requirements.txt \
-          --revision "${NV_REASON_CT_REVISION:-main}" --local-dir "$nv_reason_ct_prereqs" &&
-        python -m pip install -r "$nv_reason_ct_prereqs/requirements.txt" "torch>=2.9.0"
-      contains:
-        - README.md
-        - LICENSE
-        - config.json
-        - model.py
-        - processor.py
-        - processor_config.json
-        - preprocessor_config.json
-        - video_preprocessor_config.json
-        - image_processor_3d/preprocessor_config.json
-        - generation_config.json
-        - tokenizer_config.json
-        - tokenizer.json
-        - chat_template.jinja
-        - model.safetensors
+      installation_url: https://github.com/NVIDIA-Medtech/NV-Reason-CT#installation
   side_effects:
     pip_packages:
-      - transformers==5.6.2
-      - torch>=2.9.0
-      - monai>=1.5.1
-      - nibabel>=5.3.3
-      - dynamic-network-architectures==0.4.3
+      - transformers
+      - torch
+      - monai
+      - nibabel
+      - dynamic-network-architectures
       - scipy
       - numpy
       - Pillow
       - timm
       - einops
       - safetensors
-      - "huggingface_hub>=1.5,<2"
-      - packaging>=20.9
+      - huggingface_hub
     local_writes:
       - {path: "<caller-provided --out-dir>", approx_mb_max: 5}
     home_writes:
@@ -144,7 +122,7 @@ runtime:
       - https://huggingface.co
     requires_docker: false
     requires_gpu: cuda
-    gpu_fallback: mock_only
+    gpu_fallback: none
     environment:
       clean_environment_required: false
       clean_environment_recommended: true
@@ -152,30 +130,23 @@ runtime:
       user_environment_modification_ok: false
       recommended_isolation: fresh venv or container for live inference and evidence runs
       notes: >
-        The upstream requirements pin Transformers and
-        dynamic-network-architectures and require torch>=2.9.0. The wrapper
-        never installs packages. Install prerequisites only in a caller-selected
-        isolated environment; capture --check-setup output for evidence.
-    env_required: []
-    env_optional:
-      - MOCK_NV_REASON_CT
-      - NV_REASON_CT_MODEL
-      - NV_REASON_CT_REVISION
-      - HF_HOME
-      - HF_HUB_CACHE
-      - HF_MODULES_CACHE
-      - XDG_CACHE_HOME
-      - TORCH_HOME
-      - HF_TOKEN
-      - TRANSFORMERS_OFFLINE
-      - HF_HUB_OFFLINE
-      - CUDA_VISIBLE_DEVICES
+        Follow the upstream repository's installation instructions and dependency
+        requirements. This skill records installed versions without maintaining
+        package constraints or installing packages. Use a caller-selected isolated
+        environment and capture --check-setup output for evidence.
 
 limitations:
   - >
     This is a thin wrapper. NIfTI preprocessing, anatomy-aware cropping, model
     inference, and decoding are delegated to the nvidia/NV-Reason-CT custom
     Transformers code loaded with trust_remote_code=True.
+  - >
+    Live inference requires explicit --trust-model-code acknowledgement for
+    the selected Hub revision or local export. The wrapper warns before loading
+    custom Python code; the flag is not a sandbox or authenticity check. The
+    default runtime.args template deliberately does not supply this consent;
+    invoke the wrapper CLI with explicit authorization for live inference.
+    Read-only --check-setup does not require the flag or grant that authorization.
   - >
     Output is not a diagnosis, clinical report, treatment recommendation, or
     triage decision. It is engineering evidence and requires qualified review
@@ -200,10 +171,11 @@ limitations:
     and abdomen; no clinical ground truth or quality score is inferred from
     agreement with the upstream CLI.
   - >
-    Upstream pins transformers==5.6.2 and
-    dynamic-network-architectures==0.4.3 and requires torch>=2.9.0 but does not
-    pin an exact PyTorch build or every numerical dependency. Use an isolated
-    environment and retain the setup report for live evidence.
+    Dependency requirements and compatibility are maintained upstream. Setup
+    checks imports, CUDA/bfloat16, and asset presence, not package-version
+    compatibility or vulnerabilities. Retain the installed-version report and
+    review the actual environment separately. SKILL.md's historical baseline
+    has a known Transformers security advisory, not a remediated live result.
   - >
     The manifest currently follows the moving model revision main. Replace it
     with a reviewed immutable public release revision before publication.
@@ -211,14 +183,18 @@ limitations:
     Each wrapper invocation is a single-turn inference request. It does not
     implement upstream's model-reuse or multi-turn history examples. Upstream
     training JSONL records are not inference fixtures and do not include CT volumes.
+  - >
+    --model also accepts a complete local model-and-processor export from
+    upstream SFT/GRPO training, not an adapter-only checkpoint. Local exports
+    have no Hub revision; output records their absolute path and null revisions.
+    Retain separate content hashes for reproducibility. Local loading uses
+    local_files_only=True but is not a sandbox for custom Python code.
 
 validation:
   expected_runtime_seconds:
     min: 0.0
     max: 3600.0
     inference_path: runtime.inference_seconds
-  env_pin:
-    nibabel: ">=5.3.3"
   sanity_checks:
     - {path: skill, eq: nv_reason_ct}
     - {path: input.volume.format, eq: nifti}
@@ -228,8 +204,10 @@ validation:
     - {path: input.volume.sha256, matches: "^[0-9a-f]{64}$"}
     - {path: input.anatomy_region, matches: "^(chest|abdomen|none)$"}
     - {path: output.response_text, length_gte: 1}
-    - {path: runtime.model, eq: nvidia/NV-Reason-CT}
-    - {path: runtime.mode, matches: "^(mock|hf_transformers)$"}
+    - {path: runtime.model, length_gte: 1}
+    - {path: runtime.model_source, matches: "^(hub|local)$"}
+    - {path: runtime.mode, eq: hf_transformers}
+    - {path: runtime.mock, eq: false}
     - {path: runtime.attention_implementation, eq: sdpa}
     - {path: runtime.trust_remote_code, eq: true}
     - {path: runtime.deterministic_generation, eq: true}

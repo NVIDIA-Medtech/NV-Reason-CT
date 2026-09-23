@@ -16,6 +16,19 @@ import pytest
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
+
+@pytest.mark.parametrize("name", ["example_1", "example_2", "example_3"])
+def test_real_example_metadata(wrapper, upstream_checkout, name):
+    import nibabel as nib
+
+    volume = upstream_checkout / "examples" / f"{name}.nii.gz"
+    info = wrapper._volume_info(volume)
+    image = nib.load(volume)
+    assert info.shape == image.shape
+    assert info.spacing_mm == pytest.approx(image.header.get_zooms())
+    assert info.sha256 == hashlib.sha256(volume.read_bytes()).hexdigest()
+
+
 # Forward only the listed runtime/cache settings. Authentication variables and
 # mock flags are excluded from the offline child processes.
 LIVE_ENVIRONMENT_KEYS = (
@@ -73,7 +86,9 @@ def _run_logged(command, output_dir, name):
     return result.stdout
 
 
-def test_logged_subprocess_preserves_isolation_without_credentials(tmp_path, monkeypatch):
+def test_logged_subprocess_preserves_isolation_without_credentials(
+    tmp_path, monkeypatch
+):
     cache = str(tmp_path / "model-cache")
     monkeypatch.setenv("HF_HUB_CACHE", cache)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
@@ -90,7 +105,8 @@ def test_logged_subprocess_preserves_isolation_without_credentials(tmp_path, mon
         assert command == [sys.executable, "--version"]
         env = kwargs["env"]
         assert set(env) <= set(LIVE_ENVIRONMENT_KEYS) | {
-            "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"
+            "HF_HUB_OFFLINE",
+            "TRANSFORMERS_OFFLINE",
         }
         assert env["HF_HUB_CACHE"] == cache
         assert env["CUDA_VISIBLE_DEVICES"] == "0"
@@ -129,6 +145,7 @@ def test_live_example_matches_upstream(
             sys.executable,
             str(SKILL_DIR / "scripts" / "run_nv_reason_ct.py"),
             str(volume),
+            "--trust-model-code",
             "--anatomy-region",
             region,
             "--prompt",

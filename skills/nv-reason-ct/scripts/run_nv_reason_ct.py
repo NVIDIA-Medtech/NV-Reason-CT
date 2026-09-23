@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Run NV-Reason-CT inference on one NIfTI CT volume.
-
-The live path follows the upstream Hugging Face Transformers model card. The
-mock path exists for CI and command-contract checks; it never calls the model
-and must not be treated as model or clinical output.
-"""
+"""Run NV-Reason-CT inference on one existing NIfTI CT volume."""
 
 from __future__ import annotations
 
@@ -32,15 +27,8 @@ TRUTHY = {"1", "true", "yes", "on"}
 HASH_BLOCK_BYTES = 1024 * 1024
 GIT_LFS_POINTER_HEADER = b"version https://git-lfs.github.com/spec/v1"
 
-EXACT_UPSTREAM_VERSIONS = {
-    "transformers": "5.6.2",
-    "dynamic-network-architectures": "0.4.3",
-}
-MINIMUM_UPSTREAM_VERSIONS = {
-    "torch": "2.9.0",
-    "monai": "1.5.1",
-    "nibabel": "5.3.3",
-}
+UPSTREAM_SETUP_URL = "https://github.com/NVIDIA-Medtech/NV-Reason-CT#installation"
+# Import inventory only; upstream owns version constraints and installation.
 DEPENDENCY_IMPORTS = {
     "torch": "torch",
     "transformers": "transformers",
@@ -54,7 +42,6 @@ DEPENDENCY_IMPORTS = {
     "einops": "einops",
     "safetensors": "safetensors",
     "huggingface-hub": "huggingface_hub",
-    "packaging": "packaging",
 }
 ENVIRONMENT_PACKAGES = tuple(DEPENDENCY_IMPORTS)
 # Assets used by the reviewed upstream composite processor and generation path.
@@ -106,8 +93,6 @@ class InputSpec:
     case_id: str
     anatomy_region: str
     enable_thinking: bool
-    fixture_mock: bool
-    fixture_mock_response: str | None
 
 
 def _truthy(value: str | None) -> bool:
@@ -196,95 +181,48 @@ def _cached_weight_requirements(files: dict[str, Path]) -> set[str]:
     return {index_name, *weight_map.values()}
 
 
-def _model_cache_report(model_id: str, revision: str) -> dict[str, Any]:
+def _model_cache_report(model_id: str, revision: str | None) -> dict[str, Any]:
+    """Inspect only the selected local export or cached Hub snapshot, offline."""
     report: dict[str, Any] = {
         "inspectable": False,
         "cached": False,
         "repo_id": model_id,
         "revision": revision,
         "resolved_revision": None,
-        "revisions": 0,
-        "size_on_disk_mb": 0,
-        "has_config": False,
-        "has_custom_model_code": False,
-        "has_custom_processor_code": False,
-        "has_safetensors": False,
         "complete": False,
         "missing_files": sorted((*REQUIRED_MODEL_FILES, "model.safetensors")),
     }
     try:
-        from huggingface_hub import scan_cache_dir
+        if revision is None:
+            snapshot = Path(model_id)
+        else:
+            from huggingface_hub import snapshot_download
 
-        cache = scan_cache_dir()
-    except Exception as exc:
-        report["error"] = str(exc)
-        return report
-
-    report["inspectable"] = True
-    for repo in cache.repos:
-        if repo.repo_id != model_id or repo.repo_type != "model":
-            continue
-        report["revisions"] = len(repo.revisions)
-        snapshot = next(
-            (
-                candidate
-                for candidate in repo.revisions
-                if revision == candidate.commit_hash or revision in candidate.refs
-            ),
-            None,
-        )
-        if snapshot is None:
-            return report
+            snapshot = Path(
+                snapshot_download(
+                    model_id, revision=revision, local_files_only=True, token=False
+                )
+            )
+            if not re.fullmatch(HUB_COMMIT_PATTERN, snapshot.name):
+                raise ValueError("cached snapshot has no immutable Hub revision")
+            report["resolved_revision"] = snapshot.name
+        report.update(inspectable=True, cached=snapshot.is_dir())
         files = {
-            str(
-                cached_file.file_path.relative_to(snapshot.snapshot_path)
-            ): cached_file.file_path
-            for cached_file in snapshot.files
-            if cached_file.size_on_disk > 0
+            path.relative_to(snapshot).as_posix(): path
+            for path in snapshot.rglob("*")
+            if path.is_file() and path.stat().st_size > 0
         }
-        report.update(
-            cached=True,
-            resolved_revision=snapshot.commit_hash,
-            size_on_disk_mb=round(snapshot.size_on_disk / 1024 / 1024),
-            has_config="config.json" in files,
-            has_custom_model_code="model.py" in files,
-            has_custom_processor_code="processor.py" in files,
-            missing_files=sorted(set(REQUIRED_MODEL_FILES) - files.keys()),
-        )
-        try:
-            weight_files = _cached_weight_requirements(files)
-        except (OSError, ValueError) as exc:
-            report["error"] = f"could not inspect cached weights: {exc}"
-            return report
-        report["has_safetensors"] = weight_files.issubset(files)
+        weight_files = _cached_weight_requirements(files)
         report["missing_files"] = sorted(
             (set(REQUIRED_MODEL_FILES) | weight_files) - files.keys()
         )
         report["complete"] = not report["missing_files"]
-        return report
+    except Exception as exc:
+        report["error"] = f"could not inspect selected model assets: {exc}"
     return report
 
 
-def _minimum_version_mismatches(versions: dict[str, str | None]) -> dict[str, Any]:
-    try:
-        from packaging.version import InvalidVersion, Version
-    except ImportError as exc:
-        raise SkillError("dependency version checks require packaging") from exc
-    mismatches = {}
-    for name, required in MINIMUM_UPSTREAM_VERSIONS.items():
-        installed = versions.get(name)
-        try:
-            compatible = installed is not None and Version(installed) >= Version(
-                required
-            )
-        except InvalidVersion:
-            compatible = False
-        if not compatible:
-            mismatches[name] = {"installed": installed, "required": f">={required}"}
-    return mismatches
-
-
-def _setup_report(model_id: str, revision: str) -> dict[str, Any]:
+def _setup_report(model_id: str, revision: str | None) -> dict[str, Any]:
     dependencies = {
         name: _package_status(name, import_name)
         for name, import_name in DEPENDENCY_IMPORTS.items()
@@ -294,36 +232,17 @@ def _setup_report(model_id: str, revision: str) -> dict[str, Any]:
         for name, status in dependencies.items()
         if not status["installed"] or not status["importable"]
     ]
-    exact_version_mismatches = {
-        name: {
-            "installed": dependencies[name]["version"],
-            "required": required,
-        }
-        for name, required in EXACT_UPSTREAM_VERSIONS.items()
-        if dependencies[name]["version"] != required
-    }
-    minimum_version_mismatches = (
-        _minimum_version_mismatches(
-            {name: status["version"] for name, status in dependencies.items()}
-        )
-        if dependencies["packaging"]["importable"]
-        else {}
-    )
     cuda = _cuda_report()
     cache = _model_cache_report(model_id, revision)
 
     if missing_or_broken:
         recommendation = "install_or_repair_upstream_dependencies"
-    elif exact_version_mismatches:
-        recommendation = "use_the_upstream_exact_dependency_versions"
-    elif minimum_version_mismatches:
-        recommendation = "use_the_upstream_minimum_dependency_versions"
     elif not cuda["available"]:
-        recommendation = "use_a_cuda_host_or_mock_mode"
+        recommendation = "use_a_cuda_host"
     elif not cuda["bfloat16_supported"]:
         recommendation = "use_a_cuda_gpu_with_bfloat16_support"
     elif not cache["complete"]:
-        recommendation = "download_model_assets_or_disable_local_files_only"
+        recommendation = "stage_complete_model_and_processor_assets"
     else:
         recommendation = "ready_for_live_cuda_inference"
 
@@ -332,12 +251,14 @@ def _setup_report(model_id: str, revision: str) -> dict[str, Any]:
         "setup": {
             "python": sys.executable,
             "model": model_id,
+            "model_source": "local" if revision is None else "hub",
             "revision": revision,
             "recommended_torch_dtype": "bfloat16",
             "recommended_attention_implementation": "sdpa",
             "dependencies": dependencies,
-            "exact_version_mismatches": exact_version_mismatches,
-            "minimum_version_mismatches": minimum_version_mismatches,
+            "version_constraints_checked": False,
+            "dependency_setup_url": UPSTREAM_SETUP_URL,
+            "model_code_opt_in_required": True,
             "cuda": cuda,
             "model_cache": cache,
             "recommendation": recommendation,
@@ -451,11 +372,21 @@ def _load_json_fixture(
     cli_enable_thinking: bool | None,
 ) -> InputSpec:
     try:
-        fixture = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SkillError(f"fixture is not valid JSON: {path}: {exc}") from exc
+        fixture = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SkillError(f"could not read JSON request {path}: {exc}") from exc
     if not isinstance(fixture, dict):
         raise SkillError(f"fixture must be a JSON object: {path}")
+    unknown = fixture.keys() - {
+        "volume_path",
+        "ct_path",
+        "prompt",
+        "case_id",
+        "anatomy_region",
+        "enable_thinking",
+    }
+    if unknown:
+        raise SkillError(f"unsupported request fields: {', '.join(sorted(unknown))}")
 
     volume_value = str(
         fixture.get("volume_path") or fixture.get("ct_path") or ""
@@ -474,17 +405,6 @@ def _load_json_fixture(
     case_id = str(fixture.get("case_id") or path.stem).strip()
     if not case_id:
         raise SkillError("case_id must not be empty")
-    fixture_mock = _fixture_bool(fixture, "mock", False)
-    fixture_mock_response = fixture.get("mock_response")
-    if fixture_mock_response is not None and not isinstance(fixture_mock_response, str):
-        raise SkillError("fixture field mock_response must be a string when present")
-
-    if volume_value.startswith("generated://"):
-        raise SkillError(
-            "generated:// inputs are no longer supported; prepare test data "
-            "outside the skill and supply an existing NIfTI volume. "
-            "Use the upstream examples for end-to-end inference."
-        )
     if volume_value:
         volume_path = Path(volume_value)
         if not volume_path.is_absolute():
@@ -502,8 +422,6 @@ def _load_json_fixture(
         case_id=case_id,
         anatomy_region=region,
         enable_thinking=enable_thinking,
-        fixture_mock=fixture_mock,
-        fixture_mock_response=fixture_mock_response,
     )
 
 
@@ -535,60 +453,47 @@ def _load_input(
         case_id=path.name.removesuffix(".gz").removesuffix(".nii"),
         anatomy_region=region,
         enable_thinking=enable_thinking,
-        fixture_mock=False,
-        fixture_mock_response=None,
     )
 
 
-def _mock_response(spec: InputSpec, info: VolumeInfo) -> str:
-    if spec.fixture_mock_response:
-        return spec.fixture_mock_response
-    return (
-        "Mock NV-Reason-CT response for volume "
-        f"{spec.case_id!r} with shape {list(info.shape)}. "
-        "This deterministic response verifies NIfTI loading, prompt and region "
-        "wiring, and JSON output only; it asserts no clinical finding."
-    )
-
-
-def _require_live_versions() -> None:
-    mismatches = {
-        name: {"installed": _installed_version(name), "required": required}
-        for name, required in EXACT_UPSTREAM_VERSIONS.items()
-        if _installed_version(name) != required
-    }
-    mismatches.update(
-        _minimum_version_mismatches(
-            {name: _installed_version(name) for name in MINIMUM_UPSTREAM_VERSIONS}
-        )
-    )
-    if mismatches:
-        details = ", ".join(
-            f"{name}={values['installed'] or 'missing'} (required {values['required']})"
-            for name, values in sorted(mismatches.items())
-        )
-        raise SkillError(
-            "live inference requires the upstream dependency versions: "
-            f"{details}. Create a fresh environment and run --check-setup."
-        )
-
-
-def _select_cuda_device(requested: str) -> str:
+def _select_cuda_device() -> str:
     try:
         import torch
     except Exception as exc:
         raise SkillError(f"live inference requires torch: {exc}") from exc
     if not torch.cuda.is_available():
         raise SkillError(
-            "CUDA is unavailable for live NV-Reason-CT inference. Use a CUDA "
-            "host or --mock for a command-contract check."
+            "CUDA is unavailable for NV-Reason-CT inference. Use a CUDA host."
         )
     try:
         if not torch.cuda.is_bf16_supported():
             raise SkillError("the visible CUDA device does not report bfloat16 support")
     except AttributeError as exc:
         raise SkillError("installed torch cannot verify CUDA bfloat16 support") from exc
-    return "cuda" if requested == "auto" else requested
+    return "cuda"
+
+
+def _model_location(model_id: str, revision: str | None) -> tuple[str, str | None]:
+    """A local export has no Hub revision; never send its path to Hub APIs."""
+    if not model_id.strip():
+        raise SkillError("--model must not be empty")
+    path = Path(model_id).expanduser()
+    if path.exists():
+        if not path.is_dir():
+            raise SkillError(f"local model path is not a directory: {path}")
+        if revision is not None:
+            raise SkillError("--revision applies only to Hub models, not local exports")
+        return str(path.resolve()), None
+    if model_id.startswith(("/", ".", "~")) or len(path.parts) > 2:
+        raise SkillError(f"local model directory not found: {path}")
+    revision = (
+        revision
+        if revision is not None
+        else os.environ.get("NV_REASON_CT_REVISION", DEFAULT_REVISION)
+    )
+    if not revision.strip():
+        raise SkillError("--revision must not be empty")
+    return model_id, revision
 
 
 def _resolve_model_revision(
@@ -622,6 +527,17 @@ def _resolve_model_revision(
     return commit
 
 
+def _require_model_code_consent(trust_model_code: bool) -> None:
+    if trust_model_code is not True:
+        raise SkillError(
+            "model loading requires executing custom Python code with this "
+            "process's permissions, including for local exports. Review and "
+            "authorize the selected model/processor code, then pass "
+            "--trust-model-code explicitly. Use --check-setup for inspection "
+            "without loading model code."
+        )
+
+
 def _run_transformers_inference(
     *,
     volume_path: Path,
@@ -629,51 +545,72 @@ def _run_transformers_inference(
     anatomy_region: str,
     enable_thinking: bool,
     model_id: str,
-    revision: str,
-    device_request: str,
+    revision: str | None,
     max_new_tokens: int,
     local_files_only: bool,
+    trust_model_code: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    _require_live_versions()
+    # Also guard direct Python callers before imports, Hub lookup, or loading.
+    _require_model_code_consent(trust_model_code)
     try:
         import torch
         import transformers
         from transformers import AutoModelForImageTextToText, AutoProcessor
     except Exception as exc:
         raise SkillError(
-            "live inference requires the packages in the upstream requirements. "
-            f"Run --check-setup first. Import error: {exc}"
+            "live inference requires the upstream inference dependencies. "
+            f"Follow {UPSTREAM_SETUP_URL} in a fresh environment and run "
+            f"--check-setup first. Import error: {exc}"
         ) from exc
 
-    device = _select_cuda_device(device_request)
-    token = os.environ.get("HF_TOKEN") or None
+    device = _select_cuda_device()
     processor_region = None if anatomy_region == "none" else anatomy_region
-    resolved_revision = _resolve_model_revision(
-        model_id, revision, local_files_only=local_files_only, token=token
-    )
+    resolved_revision = None
+    load_options: dict[str, Any] = {"local_files_only": True}
+    if revision is not None:
+        token = os.environ.get("HF_TOKEN") or None
+        resolved_revision = _resolve_model_revision(
+            model_id, revision, local_files_only=local_files_only, token=token
+        )
+        load_options.update(
+            local_files_only=local_files_only,
+            token=token,
+        )
 
+    source = (
+        f"Hub model {model_id!r} at commit {resolved_revision}"
+        if revision is not None
+        else f"local export {model_id!r}"
+    )
+    print(
+        f"warning: --trust-model-code authorizes executing custom model and "
+        f"processor Python code from {source} with this process's permissions. "
+        "This is not sandboxed; a commit hash or local path does not establish "
+        "code safety.",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
         model = (
             AutoModelForImageTextToText.from_pretrained(
                 model_id,
+                trust_remote_code=trust_model_code,
+                # An immutable commit for Hub assets; None for a local export.
                 revision=resolved_revision,
                 code_revision=resolved_revision,
-                trust_remote_code=True,
                 dtype=torch.bfloat16,
                 attn_implementation="sdpa",
-                local_files_only=local_files_only,
-                token=token,
+                **load_options,
             )
             .eval()
             .to(device)
         )
         processor = AutoProcessor.from_pretrained(
             model_id,
+            trust_remote_code=trust_model_code,
             revision=resolved_revision,
             code_revision=resolved_revision,
-            trust_remote_code=True,
-            local_files_only=local_files_only,
-            token=token,
+            **load_options,
         )
         messages = [
             {
@@ -744,6 +681,8 @@ def _environment_packages() -> dict[str, str]:
 def _preserve_partial_result(payload: dict[str, Any], out_dir: Path) -> None:
     """Retain partial JSON even when a caller discards stdout on nonzero exit."""
     try:
+        out_dir = out_dir.resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
         # A unique name preserves results from earlier attempts in the same out-dir.
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -797,19 +736,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(enable_thinking=None)
     parser.add_argument("--out-dir", type=Path, default=Path("runs/nv_reason_ct"))
     parser.add_argument(
+        "--model",
         "--model-id",
+        dest="model_id",
         default=os.environ.get("NV_REASON_CT_MODEL", DEFAULT_MODEL),
-        help=f"Hugging Face model id (default: {DEFAULT_MODEL}).",
+        help=f"Hub model id or complete local model/processor export (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--revision",
-        default=os.environ.get("NV_REASON_CT_REVISION", DEFAULT_REVISION),
         help="Hugging Face model revision (default: main).",
     )
-    parser.add_argument("--device", choices=["auto", "cuda"], default="auto")
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
     parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument("--mock", action="store_true", help="Skip model inference.")
+    parser.add_argument(
+        "--trust-model-code",
+        action="store_true",
+        help="Authorize unsandboxed custom model/processor Python code (Hub or local); required for inference.",
+    )
     parser.add_argument(
         "--check-setup",
         action="store_true",
@@ -831,16 +774,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_new_tokens < 1:
         print("error: --max-new-tokens must be >= 1", file=sys.stderr)
         return 2
-    if not str(args.model_id).strip():
-        print("error: --model-id must not be empty", file=sys.stderr)
-        return 2
-    if not str(args.revision).strip():
-        print("error: --revision must not be empty", file=sys.stderr)
-        return 2
-
     try:
+        model_id, revision = _model_location(args.model_id, args.revision)
         if args.check_setup:
-            report = _setup_report(args.model_id, args.revision)
+            report = _setup_report(model_id, revision)
             print(json.dumps(report, indent=2, sort_keys=True))
             not_ready = (
                 report["setup"]["recommendation"] != "ready_for_live_cuda_inference"
@@ -853,8 +790,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        out_dir = args.out_dir.resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        _require_model_code_consent(args.trust_model_code)
         spec = _load_input(
             args.volume_or_fixture.resolve(),
             args.prompt,
@@ -864,41 +800,22 @@ def main(argv: list[str] | None = None) -> int:
         info = _volume_info(spec.volume_path)
         local_files_only = bool(
             args.local_files_only
+            or revision is None
             or _truthy(os.environ.get("TRANSFORMERS_OFFLINE"))
             or _truthy(os.environ.get("HF_HUB_OFFLINE"))
         )
-        mock = bool(
-            args.mock
-            or spec.fixture_mock
-            or _truthy(os.environ.get("MOCK_NV_REASON_CT"))
-        )
-
         started = time.perf_counter()
-        if mock:
-            response_text = _mock_response(spec, info)
-            runtime_extra = {
-                "resolved_revision": None,
-                "device": "none",
-                "torch_dtype": "none",
-                "transformers_version": _installed_version("transformers"),
-                "torch_version": _installed_version("torch"),
-                "generated_tokens": 0,
-                "truncated_by_max_new_tokens": False,
-            }
-            mode = "mock"
-        else:
-            response_text, runtime_extra = _run_transformers_inference(
-                volume_path=spec.volume_path,
-                prompt=spec.prompt,
-                anatomy_region=spec.anatomy_region,
-                enable_thinking=spec.enable_thinking,
-                model_id=args.model_id,
-                revision=args.revision,
-                device_request=args.device,
-                max_new_tokens=args.max_new_tokens,
-                local_files_only=local_files_only,
-            )
-            mode = "hf_transformers"
+        response_text, runtime_extra = _run_transformers_inference(
+            volume_path=spec.volume_path,
+            prompt=spec.prompt,
+            anatomy_region=spec.anatomy_region,
+            enable_thinking=spec.enable_thinking,
+            model_id=model_id,
+            revision=revision,
+            max_new_tokens=args.max_new_tokens,
+            local_files_only=local_files_only,
+            trust_model_code=args.trust_model_code,
+        )
         elapsed = time.perf_counter() - started
 
         payload = {
@@ -924,11 +841,12 @@ def main(argv: list[str] | None = None) -> int:
                 "text_chars": len(response_text),
             },
             "runtime": {
-                "model": args.model_id,
-                "revision": args.revision,
+                "model": model_id,
+                "model_source": "local" if revision is None else "hub",
+                "revision": revision,
                 "resolved_revision": runtime_extra["resolved_revision"],
-                "mode": mode,
-                "mock": mock,
+                "mode": "hf_transformers",
+                "mock": False,
                 "device": str(runtime_extra["device"]),
                 "torch_dtype": str(runtime_extra["torch_dtype"]),
                 "attention_implementation": "sdpa",
@@ -948,7 +866,7 @@ def main(argv: list[str] | None = None) -> int:
             "limitations": LIMITATIONS,
         }
         if runtime_extra["truncated_by_max_new_tokens"]:
-            _preserve_partial_result(payload, out_dir)
+            _preserve_partial_result(payload, args.out_dir)
         print(json.dumps(payload, indent=2, sort_keys=True))
         if runtime_extra["truncated_by_max_new_tokens"]:
             print(
@@ -964,7 +882,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return 3
         return 0
-    except SkillError as exc:
+    except (SkillError, OSError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -86,6 +86,7 @@
       "type": "object",
       "required": [
         "model",
+        "model_source",
         "revision",
         "resolved_revision",
         "mode",
@@ -103,13 +104,14 @@
       ],
       "properties": {
         "model": {"type": "string", "minLength": 1},
-        "revision": {"type": "string", "minLength": 1},
+        "model_source": {"enum": ["hub", "local"]},
+        "revision": {"type": ["string", "null"], "minLength": 1},
         "resolved_revision": {
           "type": ["string", "null"],
           "pattern": "^[0-9a-f]{40}$"
         },
-        "mode": {"enum": ["mock", "hf_transformers"]},
-        "mock": {"type": "boolean"},
+        "mode": {"const": "hf_transformers"},
+        "mock": {"const": false},
         "device": {"type": "string", "minLength": 1},
         "torch_dtype": {"type": "string", "minLength": 1},
         "attention_implementation": {"const": "sdpa"},
@@ -126,9 +128,16 @@
       "additionalProperties": false,
       "allOf": [
         {
-          "if": {"properties": {"mode": {"const": "hf_transformers"}}},
-          "then": {"properties": {"resolved_revision": {"type": "string"}}},
-          "else": {"properties": {"resolved_revision": {"const": null}}}
+          "if": {"properties": {"model_source": {"const": "hub"}}},
+          "then": {"properties": {
+            "revision": {"type": "string"},
+            "resolved_revision": {"type": "string"}
+          }},
+          "else": {"properties": {
+            "revision": {"const": null},
+            "resolved_revision": {"const": null},
+            "local_files_only": {"const": true}
+          }}
         }
       ]
     },
