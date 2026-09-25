@@ -3,7 +3,7 @@
 [![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face-yellow)](https://huggingface.co/nvidia/NV-Reason-CT)
 [![GitHub](https://img.shields.io/badge/github-repo-blue?logo=github)](https://github.com/NVIDIA-Medtech/NV-Reason-CT)
 [![WebDemo](https://img.shields.io/badge/Gradio-Web%20Demo-F97316?logo=gradio&logoColor=white)](https://huggingface.co/spaces/nvidia/nv-reason-ct)
-[![arXiv](https://img.shields.io/badge/arXiv-xyz-B31B1B?logo=arxiv&logoColor=white)](https://arxiv.org/abs/xyz)
+[![arXiv](https://img.shields.io/badge/arXiv-2609.27511-B31B1B?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2609.27511)
 [![License](https://img.shields.io/badge/License-OpenMDW--1.1-f5de53)](LICENSE)
 
 NV-Reason-CT is a generative vision-language model for native 3D chest and
@@ -51,7 +51,7 @@ a different Hugging Face repository is needed. The training configurations use
 ## Model overview
 
 - Language backbone: [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)
-- 3D vision encoder: Primus, initialized from COLIPRI
+- 3D vision encoder: Primus, initialized from [COLIPRI](https://huggingface.co/microsoft/colipri)
 - Input: one-channel chest or abdominal CT in `.nii` or `.nii.gz` format
 - Preprocessing: LPS orientation, 2 mm isotropic resampling, and an
   anatomy-aware `192 x 192 x 192` voxel crop
@@ -532,5 +532,5 @@ listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
 
 ## Citation
 
-This repository accompanies *NV-Reason-CT: 3D Visual Language Model for CT
-Analysis*. Full citation details will be added with the public paper release.
+This repository accompanies [NV-Reason-CT: 3D Visual Language Model for CT
+Analysis](https://arxiv.org/abs/2609.27511).
