@@ -352,7 +352,7 @@ level so the same record is easy to adapt for GRPO:
       "role": "user",
       "content": [
         {"type": "image", "image": "dataset/case-001.nii.gz"},
-        {"type": "text", "text": "Write a structured chest CT report."}
+        {"type": "text", "text": "write a structured chest CT report"}
       ]
     },
     {
