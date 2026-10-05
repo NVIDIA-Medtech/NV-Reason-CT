@@ -514,7 +514,7 @@ NV-Reason-CT builds on
 [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-4B),
 [Primus](https://openreview.net/forum?id=x4vZE4PDEu),
 [COLIPRI](https://arxiv.org/abs/2510.15042),
-[MONAI](https://monai.io/),
+[MONAI](https://project-monai.github.io/),
 [Transformers](https://github.com/huggingface/transformers), and
 [TRL](https://github.com/huggingface/trl). It extends the reasoning-centered
 training strategy introduced in
