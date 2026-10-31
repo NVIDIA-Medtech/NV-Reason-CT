@@ -1,5 +1,7 @@
 # NV-Reason-CT
 
+**English** | [Español](README.es.md)
+
 [![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face-yellow)](https://huggingface.co/nvidia/NV-Reason-CT)
 [![GitHub](https://img.shields.io/badge/github-repo-blue?logo=github)](https://github.com/NVIDIA-Medtech/NV-Reason-CT)
 [![WebDemo](https://img.shields.io/badge/Gradio-Web%20Demo-F97316?logo=gradio&logoColor=white)](https://huggingface.co/spaces/nvidia/nv-reason-ct)
